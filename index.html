@@ -1,23 +1,407 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <link rel="stylesheet" href="/assets/uni.246013da.css">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>吱吱屋 ZhizhiWu · 城市文化发现平台</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    <meta charset="UTF-8" />
-    <script>
-      var coverSupport = 'CSS' in window && typeof CSS.supports === 'function' && (CSS.supports('top: env(a)') ||
-        CSS.supports('top: constant(a)'))
-      document.write(
-        '<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0' +
-        (coverSupport ? ', viewport-fit=cover' : '') + '" />')
-    </script>
-    <title>zhizhiwu</title>
-    <!--preload-links-->
-    <!--app-context-->
-    <script type="module" crossorigin src="/assets/index-DwDxboea.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-wAAtYK8w.css">
-  </head>
-  <body>
-    <div id="app"><!--app-html--></div>
-  </body>
+    body {
+      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: #faf8f5;
+      color: #2c2c2c;
+      line-height: 1.7;
+    }
+
+    /* NAV */
+    nav {
+      background: #fff;
+      padding: 18px 40px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #eee;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .logo {
+      font-size: 22px;
+      font-weight: 700;
+      color: #5a7048;
+      letter-spacing: 1px;
+    }
+    .logo span { color: #d8cba6; }
+    nav a {
+      color: #555;
+      text-decoration: none;
+      margin-left: 28px;
+      font-size: 14px;
+    }
+    nav a:hover { color: #5a7048; }
+
+    /* HERO */
+    .hero {
+      background: linear-gradient(135deg, #5a7048 0%, #3a4e30 100%);
+      color: #fff;
+      text-align: center;
+      padding: 100px 24px 80px;
+    }
+    .hero-badge {
+      display: inline-block;
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.3);
+      padding: 6px 18px;
+      border-radius: 20px;
+      font-size: 13px;
+      margin-bottom: 24px;
+      letter-spacing: 2px;
+    }
+    .hero h1 {
+      font-size: 52px;
+      font-weight: 800;
+      letter-spacing: 4px;
+      margin-bottom: 12px;
+    }
+    .hero h1 span { color: #d8cba6; }
+    .hero-sub {
+      font-size: 18px;
+      opacity: 0.85;
+      margin-bottom: 16px;
+      letter-spacing: 1px;
+    }
+    .hero-en {
+      font-size: 14px;
+      opacity: 0.6;
+      letter-spacing: 3px;
+      margin-bottom: 40px;
+    }
+    .hero-desc {
+      max-width: 560px;
+      margin: 0 auto 48px;
+      font-size: 16px;
+      opacity: 0.9;
+      line-height: 1.9;
+    }
+    .btn {
+      display: inline-block;
+      background: #d8cba6;
+      color: #3a4e30;
+      padding: 14px 40px;
+      border-radius: 30px;
+      font-size: 15px;
+      font-weight: 700;
+      text-decoration: none;
+      letter-spacing: 1px;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.85; }
+
+    /* SECTION */
+    section {
+      padding: 80px 24px;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+    .section-label {
+      font-size: 12px;
+      letter-spacing: 3px;
+      color: #5a7048;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+    h2 {
+      font-size: 32px;
+      font-weight: 800;
+      margin-bottom: 16px;
+      color: #1a1a1a;
+    }
+    .divider {
+      width: 40px;
+      height: 3px;
+      background: #5a7048;
+      border-radius: 2px;
+      margin-bottom: 40px;
+    }
+
+    /* FEATURES */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+    }
+    .feature-card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 32px 28px;
+      border: 1px solid #eee;
+      transition: box-shadow 0.2s;
+    }
+    .feature-card:hover { box-shadow: 0 8px 32px rgba(90,112,72,0.1); }
+    .feature-icon {
+      font-size: 32px;
+      margin-bottom: 14px;
+    }
+    .feature-card h3 {
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #2c2c2c;
+    }
+    .feature-card p {
+      font-size: 14px;
+      color: #777;
+      line-height: 1.8;
+    }
+
+    /* CITIES */
+    .cities-bg {
+      background: #f0ede6;
+    }
+    .cities-inner {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 80px 24px;
+    }
+    .city-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+    }
+    .city-card {
+      background: #fff;
+      border-radius: 14px;
+      padding: 28px 24px;
+      text-align: center;
+      border: 1px solid #ddd;
+    }
+    .city-card .city-icon { font-size: 28px; margin-bottom: 10px; }
+    .city-card h3 { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+    .city-card p { font-size: 13px; color: #888; }
+
+    /* MASCOT */
+    .mascot-section {
+      background: linear-gradient(135deg, #3a4e30, #5a7048);
+      color: #fff;
+      padding: 80px 24px;
+      text-align: center;
+    }
+    .mascot-section h2 { color: #fff; }
+    .mascot-section .divider { background: #d8cba6; margin: 0 auto 40px; }
+    .mascot-section p {
+      max-width: 560px;
+      margin: 0 auto;
+      font-size: 16px;
+      opacity: 0.9;
+      line-height: 1.9;
+    }
+    .mascot-name {
+      display: inline-block;
+      background: #d8cba6;
+      color: #3a4e30;
+      padding: 4px 16px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 20px;
+      margin-bottom: 20px;
+    }
+
+    /* COMPANY */
+    .company-section {
+      background: #fff;
+      padding: 80px 24px;
+    }
+    .company-inner {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 24px;
+      margin-top: 40px;
+    }
+    .info-item {
+      padding: 24px;
+      background: #faf8f5;
+      border-radius: 12px;
+      border-left: 4px solid #5a7048;
+    }
+    .info-item .label {
+      font-size: 12px;
+      color: #999;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
+    }
+    .info-item .value {
+      font-size: 15px;
+      font-weight: 600;
+      color: #2c2c2c;
+    }
+
+    /* FOOTER */
+    footer {
+      background: #1a1a1a;
+      color: #aaa;
+      text-align: center;
+      padding: 40px 24px;
+      font-size: 13px;
+      line-height: 2;
+    }
+    footer strong { color: #fff; }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">吱吱屋 <span>ZhizhiWu</span></div>
+  <div>
+    <a href="#features">平台功能</a>
+    <a href="#cities">探索城市</a>
+    <a href="#company">关于我们</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-badge">城市文化发现平台</div>
+  <h1>吱吱屋 <span>·</span> ZhizhiWu</h1>
+  <p class="hero-sub">以数字方式发现城市之美</p>
+  <p class="hero-en">DISCOVER THE SOUL OF EVERY CITY</p>
+  <p class="hero-desc">
+    吱吱屋是一款以城市文化发现为核心的数字文旅平台，通过原创数字向导"修修"，带领用户探索城市中的山水、风物、人物与故事。
+  </p>
+  <a href="#features" class="btn">探索平台 →</a>
+</div>
+
+<!-- FEATURES -->
+<section id="features">
+  <p class="section-label">Platform Features</p>
+  <h2>平台核心功能</h2>
+  <div class="divider"></div>
+  <div class="features">
+    <div class="feature-card">
+      <div class="feature-icon">🗺️</div>
+      <h3>吱吱游 · 数字游览</h3>
+      <p>沉浸式数字游览体验，带你穿越历史与现实，感受城市文化的深度与温度。</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🏮</div>
+      <h3>文化活动发现</h3>
+      <p>实时浏览本地文化旅游活动，连接线上与线下，发现城市正在发生的精彩。</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📖</div>
+      <h3>地方历史与文化</h3>
+      <p>深度挖掘地方历史脉络，以轻松有趣的方式讲述城市的故事与记忆。</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🛍️</div>
+      <h3>吱吱GO · 特色风物</h3>
+      <p>精选地方特色风物产品，让文化以有形的方式延伸到日常生活之中。</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🤖</div>
+      <h3>修修 · 数字向导</h3>
+      <p>原创数字角色"修修"全程陪伴，以对话方式引导用户探索每一座城市。</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🌐</div>
+      <h3>多城市网络</h3>
+      <p>平台将逐步扩展至更多中国城市，形成以"修修"为核心的城市文化发现网络。</p>
+    </div>
+  </div>
+</section>
+
+<!-- CITIES -->
+<div class="cities-bg" id="cities">
+  <div class="cities-inner">
+    <p class="section-label">Pilot City · Chuzhou, Anhui</p>
+    <h2>首个试点城市 · 安徽滁州</h2>
+    <div class="divider"></div>
+    <div class="city-grid">
+      <div class="city-card">
+        <div class="city-icon">🏔️</div>
+        <h3>琅琊山</h3>
+        <p>山水与文人</p>
+      </div>
+      <div class="city-card">
+        <div class="city-icon">🏯</div>
+        <h3>凤阳</h3>
+        <p>帝王与古都</p>
+      </div>
+      <div class="city-card">
+        <div class="city-icon">🌾</div>
+        <h3>小岗村</h3>
+        <p>改革与乡村</p>
+      </div>
+      <div class="city-card">
+        <div class="city-icon">⚔️</div>
+        <h3>定远</h3>
+        <p>英雄与家国</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MASCOT -->
+<div class="mascot-section">
+  <p class="section-label" style="color:#d8cba6;">Digital Guide</p>
+  <div class="mascot-name">修修</div>
+  <h2>你的城市文化向导</h2>
+  <div class="divider"></div>
+  <p>
+    修修是吱吱屋原创的数字向导角色，以温暖、好奇的个性陪伴每一位用户探索城市。无论是千年古迹还是街巷风物，修修都将以最生动的方式，带你发现一座城市真正的灵魂。
+  </p>
+</div>
+
+<!-- COMPANY -->
+<div class="company-section" id="company">
+  <div class="company-inner">
+    <p class="section-label">About Us</p>
+    <h2>关于我们</h2>
+    <div class="divider"></div>
+    <p style="font-size:15px;color:#555;max-width:640px;line-height:1.9;">
+      吱吱屋希望通过数字技术连接城市文化、地方活动与特色风物，让用户能够以更加轻松、有趣的方式认识一座城市。平台目前处于产品测试与内容建设阶段，首个试点城市为安徽滁州，未来将逐步扩展至更多中国城市。
+    </p>
+    <div class="info-grid">
+      <div class="info-item">
+        <div class="label">所属公司</div>
+        <div class="value">广州吱吱和房科技有限公司</div>
+      </div>
+      <div class="info-item">
+        <div class="label">平台名称</div>
+        <div class="value">吱吱屋 · ZhizhiWu</div>
+      </div>
+      <div class="info-item">
+        <div class="label">首个试点城市</div>
+        <div class="value">中国 · 安徽滁州</div>
+      </div>
+      <div class="info-item">
+        <div class="label">当前状态</div>
+        <div class="value">产品测试与内容建设阶段</div>
+      </div>
+      <div class="info-item">
+        <div class="label">官方网站</div>
+        <div class="value">zhizhiverse.com</div>
+      </div>
+      <div class="info-item">
+        <div class="label">联系邮箱</div>
+        <div class="value">admin@zhizhiverse.com</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <strong>吱吱屋 ZhizhiWu</strong><br/>
+  广州吱吱和房科技有限公司<br/>
+  © 2025 ZhizhiWu · zhizhiverse.com · All Rights Reserved
+</footer>
+
+</body>
 </html>
