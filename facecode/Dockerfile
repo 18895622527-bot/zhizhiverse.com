@@ -49,6 +49,12 @@ RUN pip install \
         lpips \
         flask==3.0.3 gunicorn==22.0.0
 
+# ---- 构图 + 换背景（crop.py 的第二层）----
+# ⚠️ 必须是 0.10.x。1.x 的 tasks API 要 libEGL，无显示的容器里起不来。
+# ⚠️ mediapipe 0.10.14 会把 Pillow 拉到 11，和 torchvision 0.16 的 _imaging 冲突，
+#    所以把 Pillow 按住。2026-11-01 两个坑都踩过。
+RUN pip install "mediapipe==0.10.14" "Pillow<11" "numpy<2"
+
 # ---- CodeFormer 源码 ----
 # 用它自带的 basicsr / facelib，不要装 pip 版 basicsr ——
 # pip 版会 import torchvision.transforms.functional_tensor，新版 torchvision 已经删了。
@@ -65,7 +71,9 @@ RUN mkdir -p weights/CodeFormer weights/facelib weights/realesrgan && \
     curl -sSL -o weights/facelib/parsing_parsenet.pth         $B/parsing_parsenet.pth && \
     curl -sSL -o weights/realesrgan/RealESRGAN_x2plus.pth     $B/RealESRGAN_x2plus.pth
 
-COPY app.py /app/app.py
+# ⚠️ crop.py 必须一起拷。app.py 第一行就 import 它，
+#    漏了的话容器起来探活是好的，第一个 /enhance 请求直接 500。
+COPY app.py crop.py /app/
 WORKDIR /app
 
 # ⚠️ FC 自定义容器必须监听 0.0.0.0，端口从 FC_SERVER_PORT 读（默认 9000）。

@@ -335,6 +335,143 @@ RING_MAX = 0.60     # 周围得明显比中间平坦
 FACE_KEEP_MAX = 0.40  # 而且确实能裁掉大部分，否则不值得冒险
 
 
+# ============================================================
+# 「摆正」的第二层意思：人在画面里摆正，不只是纸摆正
+#
+# 2026-11-01 李总指出：裁完的照片「人像很明显是没有摆正的」。
+# 量了关键点才发现：两张单人照头都是正的（-0.1° / +1.0°），人脸也在中线上。
+# 他看着不正，是因为【框住人的东西不对称】—— 网纹只在一边、背景是脏灰墙、
+# 下面衣服留得比头顶多。人在正中但画面不正，看着就是没摆正。
+#
+# 所以这一层要做三件事，缺一样感觉就不成立：
+#   ① 按眼睛和下巴重新构图：两眼中点水平居中、眼睛落在 0.36、下巴落在 0.72
+#   ② 头歪超过 3° 就转平（⚠️ 只对单人照；合影里靠在肩上的歪头是真实姿态）
+#   ③ 人像分割，把背景换成干净的影楼渐变
+#
+# 这一层依赖 mediapipe（人脸关键点 + 人像分割）。
+# ⚠️ 用 0.10.x 的旧 API（mp.solutions）。1.x 的 tasks API 要 libEGL，
+#    在没有显示环境的云函数里起不来。2026-11-01 踩过。
+# ⚠️ 没装 mediapipe 时这一层整个跳过，前面的裁剪不受影响 —— 所以是懒加载。
+# ============================================================
+
+EYE_Y, CHIN_Y, PORTRAIT_AR = 0.36, 0.72, 0.75
+TILT_FIX_DEG = 3.0
+_MP = {}
+
+
+def _mp():
+    """懒加载 mediapipe。导入失败就返回 None，调用方跳过美化。"""
+    if 'ok' in _MP:
+        return _MP if _MP['ok'] else None
+    try:
+        import mediapipe as mp
+        _MP['mesh'] = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True, max_num_faces=2, refine_landmarks=True,
+            min_detection_confidence=0.4)
+        _MP['seg'] = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        _MP['ok'] = True
+        return _MP
+    except Exception as e:
+        print('[crop] mediapipe 不可用，跳过构图和换背景：%s' % str(e)[:120], flush=True)
+        _MP['ok'] = False
+        return None
+
+
+def landmarks(img):
+    """返回每张脸的 {eye_l, eye_r, chin, tilt}（像素坐标），没检出就空列表。
+    关键点编号是 mediapipe face mesh 的：左眼 33/133，右眼 362/263，下巴 152。"""
+    m = _mp()
+    if not m:
+        return []
+    h, w = img.shape[:2]
+    r = m['mesh'].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    out = []
+    for fl in (r.multi_face_landmarks or []):
+        p = [(q.x * w, q.y * h) for q in fl.landmark]
+        le = np.mean([p[33], p[133]], axis=0)
+        re = np.mean([p[362], p[263]], axis=0)
+        out.append({
+            'eye_l': le, 'eye_r': re, 'chin': np.array(p[152]),
+            'tilt': float(np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0])))
+        })
+    return out
+
+
+def recompose(img):
+    """按关键点重新构图。只处理单人照 —— 多张脸直接原样返回。
+
+    实测（2026-11-01）：
+        身份证裁出来的 587x747 → 528x704，头 -0.1° 不用转
+        墙上那张     558x655 → 394x525，头 +1.0° 不用转
+    """
+    fs = landmarks(img)
+    if len(fs) != 1:
+        return img, ''
+    f = fs[0]
+    h, w = img.shape[:2]
+    mid = (f['eye_l'] + f['eye_r']) / 2.0
+    chin = f['chin']
+    note = ''
+    if abs(f['tilt']) > TILT_FIX_DEG:
+        M = cv2.getRotationMatrix2D((float(mid[0]), float(mid[1])), f['tilt'], 1.0)
+        img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+        chin = M[:, :2] @ chin + M[:, 2]
+        note = 'tilt%+.1f ' % (-f['tilt'])
+    d = float(chin[1] - mid[1])
+    if d < 20:
+        return img, ''
+    H = d / (CHIN_Y - EYE_Y)
+    W = H * PORTRAIT_AR
+    x0, y0 = mid[0] - W / 2.0, mid[1] - EYE_Y * H
+    # 超出画面就复制边缘补上，不要把人缩小
+    pad = int(max(0, -x0, -y0, x0 + W - w, y0 + H - h)) + 2
+    if pad > 0:
+        img = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+        x0 += pad
+        y0 += pad
+    out = img[int(y0):int(y0 + H), int(x0):int(x0 + W)]
+    return out, note + 'recomp'
+
+
+def clean_bg(img, color=(188, 176, 160), feather=9):
+    """人像分割 + 柔边 + 换成影楼式浅灰渐变背景（上浅下深）。
+    ⚠️ 颜色是 BGR。默认这个暖灰跟首页的纸色是一家的，印出来不突兀。
+    ⚠️ 这一步是「换背景」里最保守的做法 —— 纯渐变，不生成任何场景。
+       李总要的「自主生成更好看的背景」如果指的是场景，那是另一个模型的事。"""
+    m = _mp()
+    if not m:
+        return img, ''
+    h, w = img.shape[:2]
+    mask = m['seg'].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).segmentation_mask
+    if mask is None:
+        return img, ''
+    k = feather * 2 + 1
+    mask = cv2.GaussianBlur(mask, (k, k), 0)
+    mask = np.clip((mask - 0.25) / 0.5, 0, 1)[..., None]
+    # 人太少说明分割失败，别把整张图糊成一块灰
+    if float(mask.mean()) < 0.08:
+        return img, ''
+    g = np.linspace(0, 1, h)[:, None, None]
+    top = np.array(color, np.float32) * 1.08
+    bot = np.array(color, np.float32) * 0.88
+    bg = np.repeat(top * (1 - g) + bot * g, w, axis=1)
+    out = (img.astype(np.float32) * mask + bg * (1 - mask)).astype(np.uint8)
+    return out, 'bg'
+
+
+def beautify(img):
+    """裁剪之后的第二层：构图 + 换背景。两步各自可失败，失败就跳过。"""
+    notes = []
+    img, n = recompose(img)
+    if n:
+        notes.append(n)
+    img, n = clean_bg(img)
+    if n:
+        notes.append(n)
+    return img, '+'.join(notes)
+
+
 def prepare(img, do_border=True):
     """整条预处理链。给调用方一个口子，不用自己拼。
 

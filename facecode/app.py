@@ -102,6 +102,7 @@ def _shrink(img):
 #    不用为了裁张照片养一个 7GB 的容器镜像。
 #    这里 import 它，GPU 这条路一行都不用改。
 from crop import prepare as crop_prepare   # noqa: E402
+from crop import beautify as crop_beautify  # noqa: E402
 
 
 @app.get('/')
@@ -133,6 +134,13 @@ def crop():
         h, w = img.shape[:2]
 
         out, why = crop_prepare(img)
+        # ⚠️ 摆正第二层（构图 + 换背景）默认也开，传 beautify:false 关。
+        #    就算第一层没裁到（why 为空），第二层也可能有事做 ——
+        #    用户自己框好的照片一样需要居中和干净背景。
+        if body.get('beautify', True):
+            out, note = crop_beautify(out)
+            if note:
+                why = (why + '+' if why else '') + note
         if not why:
             # ⚠️ 不是故障。调用方据此决定：让用户自己框。
             return jsonify(ok=True, fix='', msg='没找到照片的边，让用户自己框',
@@ -197,6 +205,17 @@ def enhance():
             if not did_fix:
                 print('[facecode] 没自动处理，原样往下走', flush=True)
 
+        # ⚠️ 构图 + 换背景放在修脸【之前】、裁剪【之后】。
+        #    之前：CodeFormer 贴回脸时要的是最终画面，先换背景再修脸，
+        #          脸边缘的柔化只做一次，不会出现"修过的脸贴在旧背景上再被抠"的双重接缝。
+        #    之后：第一层把相框、墙、网纹裁掉了，分割才不会把相框当成人。
+        #    2026-11-01 李总：「人像很明显是没有摆正的」。量过头是正的，
+        #    不正的是画面 —— 所以这一层解决的是构图，不是旋转。
+        if body.get('beautify', True):
+            img, note = crop_beautify(img)
+            if note:
+                did_fix = (did_fix + '+' if did_fix else '') + note
+
         img = _shrink(img)
 
         _load()
@@ -238,7 +257,8 @@ def enhance():
             # ⚠️ 动没动、怎么动的，原样带回去。
             #    调用方要能告诉用户「我顺手把相框和墙裁掉了、摆正了」——
             #    悄悄改了用户的照片而不说，比不改更糟。
-            #    fix 的取值：'' 没动 / 'crop' 只裁了 / 'deskew -2.6°' 摆正了
+            #    fix 的取值：'' 没动 / 'crop' 只裁了 / 'deskew -2.6°+border' 摆正并去了花边
+            #              / 后面还可能接 '+recomp'（重新构图）'+bg'（换了背景）
             fix=did_fix,
             size=[img.shape[1], img.shape[0]],
             ms=int((time.time() - t0) * 1000))
