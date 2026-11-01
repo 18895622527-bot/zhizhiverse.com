@@ -1,0 +1,11 @@
+{
+  "name": "zzCrop",
+  "version": "1.0.0",
+  "description": "照片自动预处理：摆正 / 裁剪 / 去花边 / 重新构图 / 换背景（转发给腾讯云 SCF 的 zz-crop）",
+  "main": "index.js",
+  "cloudfunction-config": {
+    "memorySize": 256,
+    "timeout": 60,
+    "runtime": "Nodejs16"
+  }
+}

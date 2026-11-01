@@ -15,6 +15,9 @@
 
 【接口】
     POST  body = {"image": "<base64>", "beautify": true, "border": true}
+       或 body = {"url": "https://…", …}
+    ⚠️ 优先用 url。SCF 同步调用的请求体上限 6MB，手机原图 base64 之后很容易超；
+       给个临时地址让这边自己去下，照片在腾讯云存储上，同一朵云里几十毫秒就下完。
     回    {"ok": true, "fix": "deskew -2.6°+border+recomp+bg", "image": "<base64>", "w":…, "h":…}
           fix 为空字符串 = 什么都没动（不是故障），调用方让用户自己框。
 
@@ -72,6 +75,17 @@ def _body(event):
         return {}
 
 
+def _download(url, limit=20 * 1024 * 1024):
+    """把临时地址下成字节。⚠️ 只认 http(s)，并且封顶 20MB —— 这是公网接口，别让人拿它当下载器。"""
+    import urllib.request
+    req = urllib.request.Request(url, headers={'User-Agent': 'zz-crop/1'})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('图片超过 20MB')
+    return data
+
+
 def main_handler(event, context):
     t0 = time.time()
     want = os.environ.get('ZZ_TOKEN', '')
@@ -80,9 +94,14 @@ def main_handler(event, context):
     try:
         body = _body(event)
         b64 = body.get('image') or ''
-        if not b64:
+        url = str(body.get('url') or '').strip()
+        if url.startswith('http'):
+            raw = _download(url)
+        elif b64:
+            raw = base64.b64decode(b64)
+        else:
             return _resp(400, {'ok': False, 'msg': '没给图片'})
-        img = cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_COLOR)
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return _resp(400, {'ok': False, 'msg': '图片解不开'})
         h, w = img.shape[:2]
