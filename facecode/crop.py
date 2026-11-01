@@ -102,15 +102,19 @@ def _biggest_contour(img):
 
 
 def _order_pts(p):
-    """四个点排成 左上 / 右上 / 右下 / 左下"""
-    r = np.zeros((4, 2), dtype='float32')
-    s = p.sum(axis=1)
-    d = np.diff(p, axis=1)
-    r[0] = p[np.argmin(s)]
-    r[2] = p[np.argmax(s)]
-    r[1] = p[np.argmin(d)]
-    r[3] = p[np.argmax(d)]
-    return r
+    """四个点排成 左上 / 右上 / 右下 / 左下。
+
+    ⚠️ 2026-11-01 改成按「绕中心的角度」排。
+       原来用 x+y 最小当左上、x-y 最小当右上 —— 照片歪到 45° 时这两个会挑中同一个点，
+       四边形退化成三角形，整条透视路直接废掉。李总发来的第一张老照片就是 45° 放的。
+       按角度排永远不会重复；谁当「左上」仍取 x+y 最小的那个，
+       歪 45° 时左上/右上分不清也没关系，后面 _upright 会按脸把方向转对。"""
+    p = np.asarray(p, dtype='float32')
+    c = p.mean(axis=0)
+    ang = np.arctan2(p[:, 1] - c[1], p[:, 0] - c[0])
+    p = p[np.argsort(ang)]                 # 图像坐标 y 朝下，角度递增 = 顺时针
+    start = int(np.argmin(p.sum(axis=1)))
+    return np.roll(p, -start, axis=0).astype('float32')
 
 
 def _norm_ang(a):
@@ -182,7 +186,7 @@ def deskew(img):
             lft = np.linalg.norm(bl - tl)
             rgt = np.linalg.norm(br - tr)
             if min(top, bot, lft, rgt) < 1:
-                return None, 'degenerate'
+                break   # 退化了就别透视，下面还有只转不透视那条路
             # ⚠️ 对边长度比 —— 区分「真·斜着拍的矩形」和「乱凑的四边形」
             #    最有效的一个数。实测：真歪 26° 的 0.65，真实原图 0.92，
             #    误判那张只有 0.42。
@@ -524,6 +528,34 @@ def clean_bg(img, color=(188, 176, 160), feather=9):
     return out, 'bg'
 
 
+def _upright(img):
+    """转 0 / 90 / 180 / 270 四个方向，留下脸最正的那个。
+
+    为什么需要它：照片歪到 45° 附近时，「转 -45°」和「转 +45°」都能把纸摆平，
+    但一个是正的、一个是躺着的；矩形本身分不出来，脸分得出来。
+    ⚠️ 只在前面真的转过（deskew）之后才调。没转过的图方向就是用户拍的方向，不要碰。
+    返回 (图, 转了几个 90°)。全部方向都找不到脸就原样返回。"""
+    cands = [(0, img),
+             (1, cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)),
+             (2, cv2.rotate(img, cv2.ROTATE_180)),
+             (3, cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE))]
+    best = None
+    for k, cand in cands:
+        fs = landmarks(cand)
+        if fs:
+            t = min(abs(f['tilt']) for f in fs)
+        elif find_faces(cand):
+            t = 15.0            # Haar 只认大致正着的脸，认出来就算 15°
+        else:
+            continue
+        if best is None or t < best[0]:
+            best = (t, k, cand)
+    if best is None or best[1] == 0:
+        return img, 0
+    print('[crop] 按脸把方向转了 %d 个 90°' % best[1], flush=True)
+    return best[2], best[1]
+
+
 def beautify(img):
     """裁剪之后的第二层：构图 + 换背景。两步各自可失败，失败就跳过。"""
     notes = []
@@ -559,6 +591,11 @@ def prepare(img, do_border=True):
         return n_face > 0 and not find_faces(cand)
 
     out, why = deskew(img)
+    if out is not None:
+        # 歪得厉害的照片转平之后可能是躺着的 —— 按脸把方向转对
+        out, turned = _upright(out)
+        if turned:
+            why += ' turn%d' % turned
     if out is not None and _lost_face(out):
         print('[crop] 摆正之后脸没了，不信这次摆正（%s）' % why, flush=True)
         out = None
