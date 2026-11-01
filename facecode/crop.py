@@ -64,6 +64,11 @@ FACE_SCALE = 2.2
 FACE_AR = 0.75      # 3:4 竖版
 FACE_EYE = 0.42     # 人脸中心落在裁剪框内这个高度比例上（偏上才像人像）
 
+# 透视拉正的两道闸（见 deskew 的说明）。
+# ⚠️ 两个数都只在 3 个样本上验过。
+QUAD_RECT_TOL = 8.0    # 四边形的边和 minAreaRect 的角度差，超过就不信四边形
+RECT_FILL_MIN = 0.80   # 凸包占 minAreaRect 的比例，够满才允许只转不透视
+
 _CASCADE = None
 
 
@@ -108,6 +113,29 @@ def _order_pts(p):
     return r
 
 
+def _norm_ang(a):
+    """把角度折到 (-45, 45]：矩形转 90° 还是矩形，比的是「歪了多少」不是「朝哪边」。"""
+    a = float(a) % 90.0
+    return a - 90.0 if a > 45.0 else a
+
+
+def _rotate_crop(img, rect):
+    """按 minAreaRect 转平再裁。只转不透视 —— 给「四个角找不全」的照片用。"""
+    (cx, cy), (rw, rh), ang = rect
+    a = _norm_ang(ang)
+    # ⚠️ 角度折过之后宽高可能要对调（OpenCV 的 angle 是跟 width 那条边算的）
+    if abs(a - float(ang)) > 1.0:
+        rw, rh = rh, rw
+    h, w = img.shape[:2]
+    M = cv2.getRotationMatrix2D((cx, cy), a, 1.0)
+    rot = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    x0, y0 = int(max(0, cx - rw / 2.0)), int(max(0, cy - rh / 2.0))
+    x1, y1 = int(min(w, cx + rw / 2.0)), int(min(h, cy + rh / 2.0))
+    if x1 - x0 < 80 or y1 - y0 < 80:
+        return None, 'too-small'
+    return rot[y0:y1, x0:x1], 'deskew %.1f°' % a
+
+
 def deskew(img):
     """找照片的四个角，透视拉正 —— 顺带把裁剪也做了。
 
@@ -115,6 +143,14 @@ def deskew(img):
         老照片常有锯齿花边。直接对轮廓 approxPolyDP 拟合不出四个角
         （波浪线上找不到拐点），2026-11-01 实测三张全部 not-a-quad。
         先 convexHull 把锯齿磨平，四个角立刻就出来了。
+
+    【⚠️ 四边形必须和 minAreaRect 对得上，否则不许透视】
+        2026-11-01 下午踩的坑：一张纸只歪 5° 的照片，轮廓在右上角断了一截
+        （浅色花边融进了浅色背景），凸包少了一个角，拟出来的四边形上边是条
+        斜线 —— 判成「歪 26°」，透视一拉，人脸被剪切了 18°。对边比 0.65 居然过了闸。
+        minAreaRect 不吃这一套：它包住整个凸包，缺个角也还是那个矩形，角度 5°。
+        所以：四边形的边角度和 minAreaRect 的角度差超过 QUAD_RECT_TOL 就不信四边形。
+        不信四边形时，如果凸包把矩形填得够满（≥ RECT_FILL_MIN），退一步只转不透视。
 
     返回 (正过来的图, 说明) 或 (None, 原因)。
     """
@@ -127,6 +163,10 @@ def deskew(img):
 
         hull = cv2.convexHull(c)
         peri = cv2.arcLength(hull, True)
+        rect = cv2.minAreaRect(hull)
+        rect_ang = _norm_ang(rect[2])
+        rect_area = float(rect[1][0] * rect[1][1])
+        fill = float(cv2.contourArea(hull)) / max(rect_area, 1.0)
         # ⚠️ eps 只试到 0.05。
         #    2026-11-01：一张【已经处理好的正照片】要 eps=0.08 这么粗的近似
         #    才凑得出四个角，然后被判成歪 18.4° —— 转下去这张就毁了。
@@ -152,7 +192,15 @@ def deskew(img):
             #       误判 → 照片被转歪，毁了。
             par = (min(top, bot) / max(top, bot)) * (min(lft, rgt) / max(lft, rgt))
             if par < 0.55:
-                return None, 'not-rect %.2f' % par
+                break
+
+            # 四条边各自的角度都得和 minAreaRect 一致
+            angs = [np.degrees(np.arctan2(b[1] - a[1], b[0] - a[0]))
+                    for a, b in ((tl, tr), (bl, br), (tl, bl), (tr, br))]
+            off = max(abs(_norm_ang(x) - rect_ang) for x in angs)
+            if off > QUAD_RECT_TOL:
+                print('[crop] 四边形和外接矩形对不上（差 %.1f°），不透视' % off, flush=True)
+                break
 
             W = int(max(bot, top))
             H = int(max(rgt, lft))
@@ -165,7 +213,11 @@ def deskew(img):
             out = cv2.warpPerspective(img, cv2.getPerspectiveTransform(q, dst), (W, H))
             ang = float(np.degrees(np.arctan2(tr[1] - tl[1], tr[0] - tl[0])))
             return out, 'deskew %.1f°' % ang
-        return None, 'not-a-quad'
+
+        # 四边形不可信。凸包把矩形填得够满，就只转不透视。
+        if fill >= RECT_FILL_MIN:
+            return _rotate_crop(img, rect)
+        return None, 'not-a-quad fill %.2f' % fill
     except Exception:
         traceback.print_exc()
         return None, 'error'
@@ -354,8 +406,14 @@ FACE_KEEP_MAX = 0.40  # 而且确实能裁掉大部分，否则不值得冒险
 # ⚠️ 没装 mediapipe 时这一层整个跳过，前面的裁剪不受影响 —— 所以是懒加载。
 # ============================================================
 
-EYE_Y, CHIN_Y, PORTRAIT_AR = 0.36, 0.72, 0.75
+# ⚠️ 2026-11-01 从 0.36 / 0.72 改成 0.43 / 0.68：原来头顶被切掉了。
+#    眼睛到下巴算 1 个单位，眼睛到头发顶大约 1.2~1.4 个单位，
+#    0.36 只给眼睛上面留了 1 个单位，刘海都放不下。
+#    现在眼睛上面留 1.7、下巴下面留 1.3 —— 头顶有余、肩膀露一截，像影楼的半身照。
+EYE_Y, CHIN_Y, PORTRAIT_AR = 0.43, 0.68, 0.75
 TILT_FIX_DEG = 3.0
+# 超过这个角度不信关键点 —— 影楼照里没人歪 25° 以上的头，那多半是网格贴错了
+TILT_MAX_DEG = 25.0
 _MP = {}
 
 
@@ -412,6 +470,9 @@ def recompose(img):
     mid = (f['eye_l'] + f['eye_r']) / 2.0
     chin = f['chin']
     note = ''
+    if abs(f['tilt']) > TILT_MAX_DEG:
+        print('[crop] 头歪 %.1f°，不像真的，不动' % f['tilt'], flush=True)
+        return img, ''
     if abs(f['tilt']) > TILT_FIX_DEG:
         M = cv2.getRotationMatrix2D((float(mid[0]), float(mid[1])), f['tilt'], 1.0)
         img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR,
@@ -421,15 +482,18 @@ def recompose(img):
     d = float(chin[1] - mid[1])
     if d < 20:
         return img, ''
+    h, w = img.shape[:2]
     H = d / (CHIN_Y - EYE_Y)
+    # ⚠️ 框超出画面就【缩框】，不补边。
+    #    2026-11-01 试过 BORDER_REPLICATE 补边：下边把衣服拉成一道道竖条，
+    #    上边把头发和证件网纹一起抹上去，分割还把那团当成人 —— 比不构图难看得多。
+    #    缩框的代价是比例不再精确是 0.43 / 0.68，但画面里每个像素都是真的。
+    H = min(H, mid[1] / EYE_Y, (h - mid[1]) / (1.0 - EYE_Y), w / PORTRAIT_AR)
     W = H * PORTRAIT_AR
-    x0, y0 = mid[0] - W / 2.0, mid[1] - EYE_Y * H
-    # 超出画面就复制边缘补上，不要把人缩小
-    pad = int(max(0, -x0, -y0, x0 + W - w, y0 + H - h)) + 2
-    if pad > 0:
-        img = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
-        x0 += pad
-        y0 += pad
+    if H < 80 or W < 60:
+        return img, ''
+    y0 = mid[1] - EYE_Y * H
+    x0 = min(max(0.0, mid[0] - W / 2.0), w - W)
     out = img[int(y0):int(y0 + H), int(x0):int(x0 + W)]
     return out, note + 'recomp'
 
@@ -485,12 +549,27 @@ def prepare(img, do_border=True):
         ''                      什么都没做，让用户自己框
     """
     fix = ''
+    # ⚠️ 「裁完脸还在不在」是最后一道保险。
+    #    2026-11-01：一张已经摆正的照片，最大的轮廓是毛衣不是照片 ——
+    #    auto_crop 把人裁成了一条只剩毛衣的横条。面积闸（刚好 0.30）没拦住。
+    #    原图里有脸、裁完没脸了，这一刀就是错的，退回去走下一级。
+    n_face = len(find_faces(img))
+
+    def _lost_face(cand):
+        return n_face > 0 and not find_faces(cand)
+
     out, why = deskew(img)
+    if out is not None and _lost_face(out):
+        print('[crop] 摆正之后脸没了，不信这次摆正（%s）' % why, flush=True)
+        out = None
     if out is not None:
         img = out
         fix = why
     else:
         box = auto_crop(img)
+        if box and _lost_face(img[box[1]:box[3], box[0]:box[2]]):
+            print('[crop] 裁完脸没了，不裁', flush=True)
+            box = None
         if box:
             img = img[box[1]:box[3], box[0]:box[2]]
             fix = 'crop'
