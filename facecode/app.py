@@ -210,6 +210,59 @@ def deskew(img):
         return None, 'error'
 
 
+def strip_border(img, min_keep=0.35, max_keep=0.97):
+    """去掉老照片四周那圈花边（锯齿边、白边、相纸留白）。
+
+    【为什么要这一步】
+        2026-11-01 李总：「照片外面的齿轮是一定要去掉的」。
+        那圈锯齿花边是相纸的物理边缘，不是照片内容。留着它：
+          - 画面里三分之一是米白色的纸，观感廉价
+          - 上色模型会把那圈纸也当成要上色的区域
+          - 人脸在整幅里占比更小，检测更容易漏
+
+    【怎么分辨花边和照片】
+        花边是一张均匀的浅色纸，照片本体有内容。
+        用【局部方差图】一刀就切开了，实测同一张图上：
+          上边（纯花边）亮度 224、方差 4
+          中心（照片）  亮度 133、方差 31
+        亮度不可靠（照片本身可能也很亮），方差可靠。
+
+    【⚠️ 两道闸】
+        留下来不足 min_keep：多半把照片内容也切掉了，不如不切。
+        留下来超过 max_keep：本来就没花边，白忙。
+
+    【⚠️ 顺序：必须在 deskew 之后】
+        歪着的时候花边是斜的，方差图切出来的矩形会把斜边的纸也圈进去。
+        先摆正，花边才是横平竖直的一圈。
+
+    返回 (x0, y0, x1, y1) 或 None。
+    """
+    try:
+        h, w = img.shape[:2]
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        k = 15
+        mean = cv2.blur(g, (k, k))
+        var = np.sqrt(np.maximum(cv2.blur(g * g, (k, k)) - mean * mean, 0))
+        thr = float(var.mean()) * 0.8
+        if thr <= 0:
+            return None
+        m = (var > thr).astype(np.uint8) * 255
+        # ⚠️ 闭运算把照片内部的平坦区域（天空、墙、浅色衣服）补回来，
+        #    不然一张背景干净的证件照会被切得七零八落。
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8))
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return None
+        x, y, ww, hh = cv2.boundingRect(max(cnts, key=cv2.contourArea))
+        keep = float(ww * hh) / float(w * h)
+        if keep < min_keep or keep > max_keep:
+            return None
+        return (x, y, x + ww, y + hh)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
 def auto_crop(img, pad=0.01):
     """把老照片本身从手机拍的那张里抠出来（不摆正，只裁）。
 
@@ -382,6 +435,16 @@ def enhance():
                 else:
                     did_fix = ''
                     print('[facecode] 没自动处理：%s' % why, flush=True)
+
+            # ⚠️ 去花边必须在摆正【之后】：歪着的时候花边是斜的，
+            #    方差图切出来的矩形会把斜边的纸也圈进去。
+            # ⚠️ 只在前面真的动过才做。原图都没裁成功的时候，
+            #    画面里还有墙和桌子，方差图切出来的不是花边是整张照片。
+            if did_fix and body.get('border', True):
+                bb = strip_border(img)
+                if bb:
+                    img = img[bb[1]:bb[3], bb[0]:bb[2]]
+                    did_fix += '+border'
 
         img = _shrink(img)
 
