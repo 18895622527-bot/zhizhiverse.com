@@ -61,12 +61,22 @@ async function callScf(url, opt) {
 	return d;
 }
 
-async function saveToCloud(buf) {
-	const name = 'mp-liuying/crop_' + Date.now() + '_' + Math.floor(Math.random() * 1e6) + '.jpg';
+async function saveToCloud(buf, tag) {
+	const name = 'mp-liuying/' + (tag || 'crop') + '_' + Date.now() + '_' + Math.floor(Math.random() * 1e6) + '.jpg';
 	const r = await uniCloud.uploadFile({ cloudPath: name, fileContent: buf });
 	const fid = (r && r.fileID) || '';
 	if (!fid) throw new Error('结果图没存进云存储');
 	return fid;
+}
+
+/* 最近一张上传的照片的 fileID。只给 cropLast 这个调试口用 ——
+ * 省得每次测试都要去 Web 控制台翻 cloud:// 串。 */
+async function lastPhotoID() {
+	const db = uniCloud.database();
+	const r = await db.collection('zz_mp_photo').orderBy('created_at', 'desc').limit(1).get();
+	const row = ((r && r.data) || [])[0];
+	if (!row || !row.before) throw new Error('库里还没有照片');
+	return row.before;
 }
 
 exports.main = async function (event) {
@@ -90,22 +100,35 @@ exports.main = async function (event) {
 		}
 	}
 
-	if (op !== 'crop') return err('op 只支持 ping / crop');
+	if (op !== 'crop' && op !== 'cropLast') return err('op 只支持 ping / crop / cropLast');
+
+	let fileID = ev.fileID;
+	if (op === 'cropLast') {
+		try { fileID = await lastPhotoID(); }
+		catch (e) { return err('找不到最近的照片', (e && e.message) || e); }
+	}
 
 	let url;
-	try { url = await tempUrl(ev.fileID); }
+	try { url = await tempUrl(fileID); }
 	catch (e) { return err('这张照片我读不出来', (e && e.message) || e); }
 
 	let d;
 	try { d = await callScf(url, ev); }
 	catch (e) { return err('自动裁剪这会儿不行，让用户自己框', (e && e.message) || e); }
 
-	/* 没认出边：不是失败，回原图，fix 空串 */
-	if (!d.fix) return { code: 0, fileID: ev.fileID, fix: '', w: d.w, h: d.h, ms: d.ms };
+	/* 没认出边：不是失败，回原图，fix 空串。
+	 * ⚠️ 这时没有灰度图（grayFileID 空），调用方得退回手机端那张灰度图。 */
+	if (!d.fix) return { code: 0, fileID: fileID, grayFileID: '', fix: '', w: d.w, h: d.h, ms: d.ms, src: fileID };
 
 	try {
-		const fid = await saveToCloud(Buffer.from(d.image, 'base64'));
-		return { code: 0, fileID: fid, fix: d.fix, w: d.w, h: d.h, ratio: d.ratio, ms: d.ms };
+		const fid = await saveToCloud(Buffer.from(d.image, 'base64'), 'crop');
+		/* 灰度图是给百度上色喂的。存不上不算失败 —— 彩色那张已经有了 */
+		let gid = '';
+		if (d.gray) {
+			try { gid = await saveToCloud(Buffer.from(d.gray, 'base64'), 'cropgray'); }
+			catch (e) { console.warn('[zzCrop] 灰度图没存住', (e && e.message) || e); }
+		}
+		return { code: 0, fileID: fid, grayFileID: gid, fix: d.fix, w: d.w, h: d.h, ratio: d.ratio, ms: d.ms, src: fileID };
 	} catch (e) {
 		return err('裁好了但没存住', (e && e.message) || e);
 	}

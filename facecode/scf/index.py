@@ -120,9 +120,19 @@ def main_handler(event, context):
         ok, buf = cv2.imencode('.jpg', out, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
         if not ok:
             return _resp(500, {'ok': False, 'msg': '结果图编码失败'})
+        # ⚠️ 顺手给一张真灰度图。百度上色只吃黑白：褪色发黄的老照片在它眼里
+        #    「已经是彩色的」，它不会动。原来这张灰度图是手机端框选时生成的，
+        #    裁剪搬到云端之后，灰度图也得跟着搬，不然上色那一步没得喂。
+        gray_b64 = ''
+        if body.get('gray', True):
+            g = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
+            okg, bufg = cv2.imencode('.jpg', g, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
+            if okg:
+                gray_b64 = base64.b64encode(bufg.tobytes()).decode('ascii')
         return _resp(200, {
             'ok': True, 'fix': fix,
             'image': base64.b64encode(buf.tobytes()).decode('ascii'),
+            'gray': gray_b64,
             'w': int(out.shape[1]), 'h': int(out.shape[0]),
             'ratio': round(float(out.shape[0] * out.shape[1]) / float(w * h), 3),
             'ms': int((time.time() - t0) * 1000),
