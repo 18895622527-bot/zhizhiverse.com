@@ -114,7 +114,7 @@ def main_handler(event, context):
         fix = ''
         if body.get('vl', True):
             faces = find_faces(img)
-            quad, vl_note = vl.locate(img, faces)
+            quad, vl_note = vl.locate(img, faces, url=url)
             if quad is not None:
                 out, fix = prepare_with_quad(img, quad, do_border=body.get('border', True))
         if not fix:
