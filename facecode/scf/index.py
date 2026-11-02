@@ -107,10 +107,13 @@ def main_handler(event, context):
         h, w = img.shape[:2]
 
         out, fix = prepare(img, do_border=body.get('border', True))
-        if body.get('beautify', True):
+        # ⚠️ 2026-11-02 李总发来一张：没认出边、没裁，但换背景照样跑了 ——
+        #    整张没裁的照片被抠成中间一小团人、四周全刷成灰蓝，比不动难看十倍。
+        #    构图和换背景【只在裁到之后】做。没裁到就一个像素都不碰，原样放行。
+        if fix and body.get('beautify', True):
             out, note = beautify(out)
             if note:
-                fix = (fix + '+' if fix else '') + note
+                fix = fix + '+' + note
 
         if not fix:
             return _resp(200, {'ok': True, 'fix': '', 'w': w, 'h': h,
