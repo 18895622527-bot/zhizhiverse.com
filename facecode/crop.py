@@ -289,7 +289,15 @@ def face_crop(img, faces=None, scale=FACE_SCALE, ar=FACE_AR, eye=FACE_EYE):
 
         H = fh * scale
         W = max(H * ar, fw * 1.6)
-        H = max(H, W / ar)
+        # ⚠️ 合影不能硬套 3:4 竖版。
+        #    2026-11-02 相册页里一张两人合影：两张脸并排，W 被撑到 629，
+        #    再按 0.75 反推 H 就成了 838 —— 把上下两条花边一起框进来，等于没裁。
+        #    多张脸时让框横过来：高度只保证装下脸和肩膀（W 的 0.75 倍），不再反推。
+        if len(faces) >= 2:
+            H = max(H, W * 0.8)
+            eye = 0.47   # 合影里头顶上方多留一点：两个人的头不在一条线上，矮的那个会被切
+        else:
+            H = max(H, W / ar)
 
         x0, y0 = cx - W / 2.0, cy - H * eye
         x1, y1 = x0 + W, y0 + H
@@ -389,6 +397,13 @@ def _ring_ratio(img, band=0.12):
 #    所以两道闸是【并且】的关系，不是或。
 RING_MAX = 0.60     # 周围得明显比中间平坦
 FACE_KEEP_MAX = 0.40  # 而且确实能裁掉大部分，否则不值得冒险
+# 第二条进门的路：脸在画面里太小。
+# ⚠️ 2026-11-02 相册页那张合影：周围全是花纹，一点都不平坦（ring 1.21），
+#    上面那道闸永远不会开。但两张脸只占画面高度的 18% —— 一张构图好的人像，
+#    脸不会这么小。身份证那张也是 18%，已经裁好的人像是 35% 以上。
+#    ⚠️ 全身照会被误伤（脸也小）：会被裁成半身。现阶段接受 —— 老照片里
+#       证件照和合影远多于全身照，而且用户在框选页还能自己改。
+FACE_SMALL_MAX = 0.22  # 最大那张脸的高 ÷ 画面高，小于它就允许按脸裁
 
 
 # ============================================================
@@ -617,7 +632,9 @@ def prepare(img, do_border=True):
             #    2026-11-01：没加闸之前，一张已经处理好的图被它裁掉了 69%。
             h0, w0 = img.shape[:2]
             ring = _ring_ratio(img)
-            box = face_crop(img) if ring < RING_MAX else None
+            faces = find_faces(img)
+            small = bool(faces) and max(f[3] for f in faces) < FACE_SMALL_MAX * h0
+            box = face_crop(img, faces) if (ring < RING_MAX or small) else None
             if box:
                 keep = float((box[2] - box[0]) * (box[3] - box[1])) / float(w0 * h0)
                 if keep <= FACE_KEEP_MAX:
