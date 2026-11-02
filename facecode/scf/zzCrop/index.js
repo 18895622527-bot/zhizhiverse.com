@@ -117,8 +117,10 @@ exports.main = async function (event) {
 	catch (e) { return err('自动裁剪这会儿不行，让用户自己框', (e && e.message) || e); }
 
 	/* 没认出边：不是失败，回原图，fix 空串。
-	 * ⚠️ 这时没有灰度图（grayFileID 空），调用方得退回手机端那张灰度图。 */
-	if (!d.fix) return { code: 0, fileID: fileID, grayFileID: '', fix: '', w: d.w, h: d.h, ms: d.ms, src: fileID };
+	 * ⚠️ 这时没有灰度图（grayFileID 空），调用方得退回手机端那张灰度图。
+	 * vl 字段是千问 VL 那一层的说明（vl 123ms / found=false / implausible:… / no-key），
+	 * 第一批真实照片跑完靠它看模型指得准不准。 */
+	if (!d.fix) return { code: 0, fileID: fileID, grayFileID: '', fix: '', vl: d.vl || '', w: d.w, h: d.h, ms: d.ms, src: fileID };
 
 	try {
 		const fid = await saveToCloud(Buffer.from(d.image, 'base64'), 'crop');
@@ -128,7 +130,12 @@ exports.main = async function (event) {
 			try { gid = await saveToCloud(Buffer.from(d.gray, 'base64'), 'cropgray'); }
 			catch (e) { console.warn('[zzCrop] 灰度图没存住', (e && e.message) || e); }
 		}
-		return { code: 0, fileID: fid, grayFileID: gid, fix: d.fix, w: d.w, h: d.h, ratio: d.ratio, ms: d.ms, src: fileID };
+		/* 调试用：给一个能在浏览器里直接打开的地址，不用去控制台翻文件 */
+		let view = '';
+		if (op === 'cropLast') {
+			try { view = await tempUrl(fid); } catch (e) {}
+		}
+		return { code: 0, fileID: fid, grayFileID: gid, fix: d.fix, vl: d.vl || '', w: d.w, h: d.h, ratio: d.ratio, ms: d.ms, src: fileID, view: view };
 	} catch (e) {
 		return err('裁好了但没存住', (e && e.message) || e);
 	}

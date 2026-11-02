@@ -583,6 +583,42 @@ def beautify(img):
     return img, '+'.join(notes)
 
 
+def warp_quad(img, q):
+    """按给定的四个角（原图像素，任意顺序）透视拉正。给千问 VL 指的角用。
+    回 (图, 说明) 或 (None, 原因)。"""
+    try:
+        q = _order_pts(np.asarray(q, dtype='float32'))
+        tl, tr, br, bl = q
+        top, bot = np.linalg.norm(tr - tl), np.linalg.norm(br - bl)
+        lft, rgt = np.linalg.norm(bl - tl), np.linalg.norm(br - tr)
+        W, H = int(max(top, bot)), int(max(lft, rgt))
+        if W < 80 or H < 80:
+            return None, 'too-small'
+        dst = np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], 'float32')
+        out = cv2.warpPerspective(img, cv2.getPerspectiveTransform(q, dst), (W, H))
+        return out, 'vl'
+    except Exception:
+        traceback.print_exc()
+        return None, 'error'
+
+
+def prepare_with_quad(img, q, do_border=True):
+    """VL 指了角之后的整条链：拉正 → 按脸转正方向 → 去花边。
+    回 (图, 说明)；拉不出来回 (原图, '')，调用方再走规则。"""
+    out, why = warp_quad(img, q)
+    if out is None:
+        return img, ''
+    out, turned = _upright(out)
+    if turned:
+        why += ' turn%d' % turned
+    if do_border:
+        bb = strip_border(out)
+        if bb:
+            out = out[bb[1]:bb[3], bb[0]:bb[2]]
+            why += '+border'
+    return out, why
+
+
 def prepare(img, do_border=True):
     """整条预处理链。给调用方一个口子，不用自己拼。
 

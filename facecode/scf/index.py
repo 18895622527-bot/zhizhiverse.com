@@ -43,7 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2          # noqa: E402
 import numpy as np  # noqa: E402
 
-from crop import prepare, beautify  # noqa: E402
+from crop import prepare, prepare_with_quad, beautify, find_faces  # noqa: E402
+import vl  # noqa: E402
 
 
 def _resp(code, obj):
@@ -106,7 +107,18 @@ def main_handler(event, context):
             return _resp(400, {'ok': False, 'msg': '图片解不开'})
         h, w = img.shape[:2]
 
-        out, fix = prepare(img, do_border=body.get('border', True))
+        # ① 主路：千问 VL 指角。② 它没指出来：退回规则。
+        #    ⚠️ VL 那一层永远不抛异常，所以这里不用 try；它的结果原样带回去（vl 字段），
+        #       第一批真实照片跑完，靠这个字段看它到底指得准不准。
+        vl_note = 'off'
+        fix = ''
+        if body.get('vl', True):
+            faces = find_faces(img)
+            quad, vl_note = vl.locate(img, faces)
+            if quad is not None:
+                out, fix = prepare_with_quad(img, quad, do_border=body.get('border', True))
+        if not fix:
+            out, fix = prepare(img, do_border=body.get('border', True))
         # ⚠️ 2026-11-02 李总发来一张：没认出边、没裁，但换背景照样跑了 ——
         #    整张没裁的照片被抠成中间一小团人、四周全刷成灰蓝，比不动难看十倍。
         #    构图和换背景【只在裁到之后】做。没裁到就一个像素都不碰，原样放行。
@@ -116,7 +128,7 @@ def main_handler(event, context):
                 fix = fix + '+' + note
 
         if not fix:
-            return _resp(200, {'ok': True, 'fix': '', 'w': w, 'h': h,
+            return _resp(200, {'ok': True, 'fix': '', 'w': w, 'h': h, 'vl': vl_note,
                                'msg': '没找到照片的边，让用户自己框',
                                'ms': int((time.time() - t0) * 1000)})
 
@@ -133,7 +145,7 @@ def main_handler(event, context):
             if okg:
                 gray_b64 = base64.b64encode(bufg.tobytes()).decode('ascii')
         return _resp(200, {
-            'ok': True, 'fix': fix,
+            'ok': True, 'fix': fix, 'vl': vl_note,
             'image': base64.b64encode(buf.tobytes()).decode('ascii'),
             'gray': gray_b64,
             'w': int(out.shape[1]), 'h': int(out.shape[0]),
