@@ -23,7 +23,9 @@
 #   Pillow<11          mediapipe 0.10.14 会拉到 11，和 torchvision 的 _imaging 冲突
 #   mediapipe 0.10.14  1.x 要 libEGL，无显示的容器起不来
 # ============================================================
-FROM python:3.10-slim-bookworm
+# ⚠️ 2026-11-03 20:00 实测：ACR 构建机连 docker.io 被劫持到境外 IP（108.160.170.43 / 157.240.15.8），
+#    连官方库镜像 python:3.10-slim 都拉不到。走 DaoCloud 的 Docker Hub 国内镜像站。
+FROM docker.m.daocloud.io/library/python:3.10-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
