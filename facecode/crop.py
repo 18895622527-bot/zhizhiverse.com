@@ -429,7 +429,11 @@ FACE_SMALL_MAX = 0.22  # 最大那张脸的高 ÷ 画面高，小于它就允许
 #    眼睛到下巴算 1 个单位，眼睛到头发顶大约 1.2~1.4 个单位，
 #    0.36 只给眼睛上面留了 1 个单位，刘海都放不下。
 #    现在眼睛上面留 1.7、下巴下面留 1.3 —— 头顶有余、肩膀露一截，像影楼的半身照。
-EYE_Y, CHIN_Y, PORTRAIT_AR = 0.43, 0.68, 0.75
+# ⚠️ 2026-11-03 再放宽到 0.40 / 0.58：0.43/0.68 出来的图头顶贴边、肩膀没了（李总发的第四张）。
+#    眼到下巴算 1，现在头顶上面留 2.2、下巴下面留 2.3 —— 肩膀和上衣能进来，像证件照不像大头贴。
+EYE_Y, CHIN_Y, PORTRAIT_AR = 0.40, 0.58, 0.75
+# 重新构图后画面不能比裁剪结果小太多 —— 小于这个比例说明切过头了，不用它
+RECOMP_MIN_KEEP = 0.70
 TILT_FIX_DEG = 3.0
 # 超过这个角度不信关键点 —— 影楼照里没人歪 25° 以上的头，那多半是网格贴错了
 TILT_MAX_DEG = 25.0
@@ -514,6 +518,9 @@ def recompose(img):
     y0 = mid[1] - EYE_Y * H
     x0 = min(max(0.0, mid[0] - W / 2.0), w - W)
     out = img[int(y0):int(y0 + H), int(x0):int(x0 + W)]
+    if out.shape[0] * out.shape[1] < RECOMP_MIN_KEEP * h * w:
+        print('[crop] 重新构图只剩 %.0f%%，切过头了，不用' % (100.0 * out.shape[0] * out.shape[1] / (h * w)), flush=True)
+        return img, ''
     return out, note + 'recomp'
 
 
