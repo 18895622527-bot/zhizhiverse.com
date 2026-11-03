@@ -197,7 +197,10 @@ def run(img, quad=None, do_border=True):
     up, o, fs = orient(src)
     if o:
         note.append(o)
-    loc, l = locate(up, fs, strict_keep=(quad is None))
+    # ⚠️ 转过角度的图四周是补出来的边（拉丝），找纸会在拉丝上拟出假四边形（2026-11-03 线上那张）。
+    #    转过的图只按脸裁，不找纸。
+    rotated = ('tilt' in o) or o.startswith('sweep')
+    loc, l = locate(up, fs, allow_paper=not rotated, strict_keep=(quad is None))
     if l:
         note.append(l)
     # 定位之后脸变大了，再定一次方向 —— 45° 放的那张：先前认不出脸，找到纸拉正后还差 90°，这一步补上
@@ -206,6 +209,11 @@ def run(img, quad=None, do_border=True):
         if o2 and (not o2.startswith('orient0') or 'tilt' in o2):
             loc, fs = up2, fs2
             note.append(o2)
+            if 'tilt' in o2 or o2.startswith('sweep'):
+                # 第二次转过之后同样不能找纸：按脸再裁一次
+                loc2, l2 = locate(loc, fs, allow_paper=False, strict_keep=False)
+                if l2:
+                    loc = loc2
     out = loc
     if do_border and (l or quad is not None):
         bb = crop.strip_border(out)
