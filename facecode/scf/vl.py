@@ -38,10 +38,11 @@ import urllib.request
 import cv2
 import numpy as np
 
-MULTI = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
+# 2026-11-03：qwen3-vl 系列只在 OpenAI 兼容接口上有，原生 multimodal-generation 接口回「Model not exist」
+MULTI = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
 # ⚠️ 2026-10-11 阿里下线了 qwen-vl-max / qwen-vl-plus。按顺序试，「模型不存在」就试下一个。
 #    环境变量 VL_MODELS 可以覆盖（逗号分隔），不用重新打包。
-VL_MODELS = [m.strip() for m in os.environ.get('VL_MODELS', 'qwen3-vl-plus,qwen3-vl-flash,qwen3-vl-max,qwen-vl-max-latest').split(',') if m.strip()]
+VL_MODELS = [m.strip() for m in os.environ.get('VL_MODELS', 'qwen3-vl-plus,qwen3-vl-flash').split(',') if m.strip()]
 CANVAS = 1000
 
 PROMPT = (
@@ -83,13 +84,12 @@ def _letterbox(img):
 def _call(key, image_ref, w, h, timeout=30):
     """照 zzPhotoTell.look：原生接口，模型降级。回文字；两个模型都不行就抛。"""
     messages = [{'role': 'user', 'content': [
-        {'image': image_ref},
-        {'text': PROMPT.format(W=w, H=h)},
+        {'type': 'image_url', 'image_url': {'url': image_ref}},
+        {'type': 'text', 'text': PROMPT.format(W=w, H=h)},
     ]}]
     last = ''
     for model in VL_MODELS:
-        payload = {'model': model, 'input': {'messages': messages},
-                   'parameters': {'top_p': 0.1, 'temperature': 0.0}}
+        payload = {'model': model, 'messages': messages, 'temperature': 0.0, 'max_tokens': 200}
         req = urllib.request.Request(
             MULTI, data=json.dumps(payload).encode('utf-8'),
             headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
@@ -104,12 +104,13 @@ def _call(key, image_ref, w, h, timeout=30):
         except Exception as e:
             last = str(e)[:120]
             continue
-        if d.get('code'):
-            last = '%s:%s' % (d.get('code'), str(d.get('message', ''))[:100])
+        if d.get('error'):
+            er = d['error'] if isinstance(d['error'], dict) else {'message': str(d['error'])}
+            last = '%s:%s' % (er.get('code', ''), str(er.get('message', ''))[:100])
             continue
         text = ''
         try:
-            c = d['output']['choices'][0]['message']['content']
+            c = d['choices'][0]['message']['content']
             if isinstance(c, list):
                 text = ''.join(x.get('text', '') for x in c if isinstance(x, dict))
             elif isinstance(c, str):
