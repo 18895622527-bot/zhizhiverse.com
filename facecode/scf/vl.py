@@ -39,7 +39,9 @@ import cv2
 import numpy as np
 
 MULTI = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
-VL_MODELS = ['qwen-vl-max', 'qwen-vl-plus']
+# ⚠️ 2026-10-11 阿里下线了 qwen-vl-max / qwen-vl-plus。按顺序试，「模型不存在」就试下一个。
+#    环境变量 VL_MODELS 可以覆盖（逗号分隔），不用重新打包。
+VL_MODELS = [m.strip() for m in os.environ.get('VL_MODELS', 'qwen3-vl-plus,qwen3-vl-flash,qwen3-vl-max,qwen-vl-max-latest').split(',') if m.strip()]
 CANVAS = 1000
 
 PROMPT = (
