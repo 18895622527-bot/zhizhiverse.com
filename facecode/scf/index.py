@@ -43,7 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2          # noqa: E402
 import numpy as np  # noqa: E402
 
-from crop import prepare, prepare_with_quad, beautify, find_faces  # noqa: E402
+from crop import beautify, find_faces  # noqa: E402
+import pipe  # noqa: E402  一条直线的预处理，见 pipe.py 文件头
 import vl  # noqa: E402
 
 
@@ -111,14 +112,11 @@ def main_handler(event, context):
         #    ⚠️ VL 那一层永远不抛异常，所以这里不用 try；它的结果原样带回去（vl 字段），
         #       第一批真实照片跑完，靠这个字段看它到底指得准不准。
         vl_note = 'off'
-        fix = ''
+        quad = None
         if body.get('vl', True):
             faces = find_faces(img)
             quad, vl_note = vl.locate(img, faces, url=url)
-            if quad is not None:
-                out, fix = prepare_with_quad(img, quad, do_border=body.get('border', True))
-        if not fix:
-            out, fix = prepare(img, do_border=body.get('border', True))
+        out, fix = pipe.run(img, quad=quad, do_border=body.get('border', True))
         # ⚠️ 2026-11-02 李总发来一张：没认出边、没裁，但换背景照样跑了 ——
         #    整张没裁的照片被抠成中间一小团人、四周全刷成灰蓝，比不动难看十倍。
         #    构图和换背景【只在裁到之后】做。没裁到就一个像素都不碰，原样放行。
