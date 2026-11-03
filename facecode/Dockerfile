@@ -73,7 +73,7 @@ RUN mkdir -p weights/CodeFormer weights/facelib weights/realesrgan && \
 
 # ⚠️ crop.py 必须一起拷。app.py 第一行就 import 它，
 #    漏了的话容器起来探活是好的，第一个 /enhance 请求直接 500。
-COPY app.py crop.py /app/
+COPY app.py crop.py pipe.py /app/
 WORKDIR /app
 
 # ⚠️ FC 自定义容器必须监听 0.0.0.0，端口从 FC_SERVER_PORT 读（默认 9000）。

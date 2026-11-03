@@ -101,8 +101,8 @@ def _shrink(img):
 #    所以同一个文件可以单独跑在腾讯云 SCF 的轻量 Python 函数上，
 #    不用为了裁张照片养一个 7GB 的容器镜像。
 #    这里 import 它，GPU 这条路一行都不用改。
-from crop import prepare as crop_prepare   # noqa: E402
 from crop import beautify as crop_beautify  # noqa: E402
+import pipe  # noqa: E402  一条直线的预处理（定方向 → 定位 → 裁 → 验证），和腾讯云 SCF 上跑的是同一份
 
 
 @app.get('/')
@@ -133,14 +133,12 @@ def crop():
             return jsonify(ok=False, msg='图片解不开'), 400
         h, w = img.shape[:2]
 
-        out, why = crop_prepare(img)
-        # ⚠️ 摆正第二层（构图 + 换背景）默认也开，传 beautify:false 关。
-        #    就算第一层没裁到（why 为空），第二层也可能有事做 ——
-        #    用户自己框好的照片一样需要居中和干净背景。
-        if body.get('beautify', True):
+        out, why = pipe.run(img, do_border=body.get('border', True))
+        # 没裁到就一个像素不碰（2026-11-02 的教训：没裁到还换背景，整张图糊成灰蓝）
+        if why and body.get('beautify', True):
             out, note = crop_beautify(out)
             if note:
-                why = (why + '+' if why else '') + note
+                why = why + '+' + note
         if not why:
             # ⚠️ 不是故障。调用方据此决定：让用户自己框。
             return jsonify(ok=True, fix='', msg='没找到照片的边，让用户自己框',
@@ -201,7 +199,7 @@ def enhance():
         #    2026-11-01 差点发出去。
         did_fix = ''
         if body.get('crop', True):
-            img, did_fix = crop_prepare(img, do_border=body.get('border', True))
+            img, did_fix = pipe.run(img, do_border=body.get('border', True))
             if not did_fix:
                 print('[facecode] 没自动处理，原样往下走', flush=True)
 
@@ -211,10 +209,10 @@ def enhance():
         #    之后：第一层把相框、墙、网纹裁掉了，分割才不会把相框当成人。
         #    2026-11-01 李总：「人像很明显是没有摆正的」。量过头是正的，
         #    不正的是画面 —— 所以这一层解决的是构图，不是旋转。
-        if body.get('beautify', True):
+        if did_fix and body.get('beautify', True):
             img, note = crop_beautify(img)
             if note:
-                did_fix = (did_fix + '+' if did_fix else '') + note
+                did_fix = did_fix + '+' + note
 
         img = _shrink(img)
 
