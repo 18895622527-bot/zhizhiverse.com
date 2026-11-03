@@ -550,6 +550,173 @@ def clean_bg(img, color=(188, 176, 160), feather=9):
     return out, 'bg'
 
 
+def face_angle(img):
+    """靠人脸找「转多少度才是正的」。回 (角度, 用来量的那块图的框) 或 (None, None)。
+
+    2026-11-03 在水磨石桌面那张上逐 10° 扫了一遍才看清：MediaPipe 的 tilt 在 -40°~60° 之间
+    是【线性可靠】的（0° 时报 51.7，转 50° 后报 0.9）。之前不信它是因为给它设了 25° 的上限 ——
+    上限是为了防「正着的脸被误转」，但那该用「小角度不转」来防，不是「大角度不信」。
+    所以：读一次 tilt → 大于 12° 就按它转 → 转完再读一次验证（|tilt| ≤ 6 且 Haar 认得出脸）。
+    一次读 + 一次验，不扫圈，几十毫秒。
+    ⚠️ 12° 以内不转：那是人本来歪着头，不是纸歪了。"""
+    h, w = img.shape[:2]
+    lm = landmarks(img)
+    box = None
+    if not lm:
+        # 脸在画面里太小（照片只占一角）时 MediaPipe 找不到。
+        # 退一步：每 30° 转一次让 Haar 粗找，找到就在那一小块上让 MediaPipe 验 —— 脸在小块里够大。
+        found = _sweep_face(img)
+        if found is None:
+            return None, None
+        a, box = found
+        roi = img[box[1]:box[3], box[0]:box[2]]
+        lm = landmarks(rotate_keep(roi, a)) if abs(a) > 1.0 else landmarks(roi)
+        if not lm:
+            return None, None
+        t = a + max(lm, key=lambda x: np.linalg.norm(x['eye_r'] - x['eye_l']))['tilt']
+    else:
+        t = max(lm, key=lambda x: np.linalg.norm(x['eye_r'] - x['eye_l']))['tilt']
+    if abs(t) <= 12.0:
+        return 0, box
+    src = img if box is None else img[box[1]:box[3], box[0]:box[2]]
+    rot = rotate_keep(src, t)
+    lm2 = landmarks(rot)
+    if not lm2:
+        return None, None
+    t2 = min(abs(x['tilt']) for x in lm2)
+    if t2 > 6.0 or not find_faces(rot, min_side=max(30, int(0.06 * min(rot.shape[:2])))):
+        print('[crop] 按脸转 %.1f° 之后还是不正（%.1f°），不信' % (t, t2), flush=True)
+        return None, None
+    return float(t), box
+
+
+def _sweep_face(img, step=30):
+    """每 step 度转一次，Haar 找脸；每个命中在原图坐标里框一块（脸的 3 倍）让 MediaPipe 验。
+    回 (转角, 原图里的框) 或 None。⚠️ Haar 在错角度上会报假脸，所以必须验。"""
+    h, w = img.shape[:2]
+    s = 500.0 / max(h, w)
+    small = cv2.resize(img, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA) if s < 1 else img
+    sh, sw = small.shape[:2]
+    diag = int(np.ceil(np.hypot(sw, sh)))
+    for a in range(0, 360, step):
+        M = cv2.getRotationMatrix2D((sw / 2.0, sh / 2.0), a, 1.0)
+        M[0, 2] += (diag - sw) / 2.0
+        M[1, 2] += (diag - sh) / 2.0
+        r = cv2.warpAffine(small, M, (diag, diag), borderMode=cv2.BORDER_REPLICATE)
+        fs = sorted(find_faces(r, min_side=24), key=lambda f: -f[2] * f[3])[:2]
+        if not fs:
+            continue
+        Minv = cv2.invertAffineTransform(M)
+        for (fx, fy, fw, fh) in fs:
+            # 脸中心映回原图，框 3 倍脸宽的一块
+            c = Minv @ np.array([fx + fw / 2.0, fy + fh / 2.0, 1.0])
+            cx, cy = c[0] / s, c[1] / s
+            half = 1.6 * fw / s
+            x0, y0 = int(max(0, cx - half)), int(max(0, cy - half))
+            x1, y1 = int(min(w, cx + half)), int(min(h, cy + half))
+            if x1 - x0 < 60 or y1 - y0 < 60:
+                continue
+            roi = img[y0:y1, x0:x1]
+            lm = landmarks(rotate_keep(roi, a)) if a else landmarks(roi)
+            if lm and min(abs(x['tilt']) for x in lm) <= 15.0:
+                return (a - 360 if a > 180 else a), (x0, y0, x1, y1)
+    return None
+
+
+def rotate_keep(img, deg, with_mask=False):
+    """绕中心转 deg 度，画布放大到装得下整张图，补边用边缘复制。
+    with_mask=True 时连一张「哪些像素是真图」的掩膜一起回 ——
+    ⚠️ 复制出来的边是大片平坦区域，找纸（低方差）的时候会把它当成纸，必须用掩膜排掉。"""
+    h, w = img.shape[:2]
+    diag = int(np.ceil(np.hypot(w, h)))
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), deg, 1.0)
+    M[0, 2] += (diag - w) / 2.0
+    M[1, 2] += (diag - h) / 2.0
+    out = cv2.warpAffine(img, M, (diag, diag), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    if not with_mask:
+        return out
+    mask = cv2.warpAffine(np.full((h, w), 255, np.uint8), M, (diag, diag), flags=cv2.INTER_NEAREST, borderValue=0)
+    return out, mask
+
+
+def paper_box(img, face=None, valid=None):
+    """转正之后，找那张「纸」：低方差的一大块（相纸、白边、花边都比桌面/墙面平）。
+    有脸就只认包着脸的那块。回 (x0, y0, x1, y1) 或 None。"""
+    try:
+        h, w = img.shape[:2]
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        k = 21
+        mean = cv2.blur(g, (k, k))
+        var = np.sqrt(np.maximum(cv2.blur(g * g, (k, k)) - mean * mean, 0))
+        if valid is not None:
+            # 转图补出来的边不算纸：方差强行拉高
+            var = var.copy()
+            var[cv2.erode(valid, np.ones((k, k), np.uint8)) == 0] = var.max() + 1.0
+        for f in (0.5, 0.7):
+            m = (var < var.mean() * f).astype(np.uint8) * 255
+            m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
+            m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((45, 45), np.uint8))
+            cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                continue
+            cands = []
+            for c in cnts:
+                x, y, ww, hh = cv2.boundingRect(c)
+                if ww * hh < 0.02 * w * h:
+                    continue
+                if face is not None:
+                    fx, fy = face[0] + face[2] / 2.0, face[1] + face[3] / 2.0
+                    # 纸得包住脸，允许脸的下沿略出框（花边照常见）
+                    if not (x - 0.3 * face[2] <= fx <= x + ww + 0.3 * face[2] and y - 0.3 * face[3] <= fy <= y + hh + 0.6 * face[3]):
+                        continue
+                cands.append((ww * hh, x, y, ww, hh))
+            if not cands:
+                continue
+            _, x, y, ww, hh = max(cands)
+            if face is not None:
+                # 包住整张脸再加一点
+                x0 = min(x, int(face[0] - 0.2 * face[2])); y0 = min(y, int(face[1] - 0.6 * face[3]))
+                x1 = max(x + ww, int(face[0] + 1.2 * face[2])); y1 = max(y + hh, int(face[1] + 1.8 * face[3]))
+            else:
+                x0, y0, x1, y1 = x, y, x + ww, y + hh
+            return (max(0, x0), max(0, y0), min(w, x1), min(h, y1))
+        return None
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def prepare_by_face(img, do_border=True):
+    """靠脸的那条路：读角度 → 转正 → 找纸 → 裁 → 去花边。
+    给「纸找不到边」的照片用（花纹桌面、花纹相册页、照片占画面很小）。
+    回 (图, 说明) 或 (原图, '')。"""
+    ang, box = face_angle(img)
+    if ang is None:
+        return img, ''
+    src = img if box is None else img[box[1]:box[3], box[0]:box[2]]
+    if abs(ang) > 1.0:
+        rot, valid = rotate_keep(src, ang, with_mask=True)
+    else:
+        rot, valid = src, None
+    faces = find_faces(rot)
+    face = max(faces, key=lambda q: q[2] * q[3]) if faces else None
+    # ⚠️ 转正之后按脸裁，不找纸。找纸（低方差）在花纹桌面上不可靠 —— 2026-11-03 试过，
+    #    tight / loose 两种包围盒按脸裁出来一模一样，找纸的两次都框成了整张。
+    pb = face_crop(rot, [face]) if face is not None else None
+    if pb is None:
+        return img, ''
+    out = rot[pb[1]:pb[3], pb[0]:pb[2]]
+    if out.shape[0] < 80 or out.shape[1] < 80:
+        return img, ''
+    why = 'byface%+.0f' % ang
+    if do_border:
+        bb = strip_border(out)
+        if bb:
+            out = out[bb[1]:bb[3], bb[0]:bb[2]]
+            why += '+border'
+    return out, why
+
+
 def _upright(img):
     """转 0 / 90 / 180 / 270 四个方向，留下脸最正的那个。
 
@@ -615,6 +782,15 @@ def prepare_with_quad(img, q, do_border=True):
     out, why = warp_quad(img, q)
     if out is None:
         return img, ''
+    # ⚠️ 千问多半回的是【轴对齐的包围盒】，不是斜着的四个角 ——
+    #    拉正等于只是裁了一块，照片在里面可能还斜着 25°。
+    #    所以拉正之后再靠脸找一次角度；找不到脸才退回只转 90° 那套。
+    lm = landmarks(out)
+    upright_ok = bool(lm) and min(abs(x['tilt']) for x in lm) <= 8.0
+    if not upright_ok:
+        out2, why2 = prepare_by_face(out, do_border=do_border)
+        if why2:
+            return out2, why + ' ' + why2
     out, turned = _upright(out)
     if turned:
         why += ' turn%d' % turned
@@ -689,6 +865,13 @@ def prepare(img, do_border=True):
             elif ring >= RING_MAX:
                 print('[crop] 周围不比中间平坦（%.2f），不是嵌在桌面里的照片，不动'
                       % ring, flush=True)
+
+    # 第四级：纸找不到、正着也认不出脸 —— 可能是斜着的。靠脸找角度再来一遍。
+    # ⚠️ 正着就有脸的不走这里：那种图不动比动安全。
+    if not fix and n_face == 0:
+        out, why = prepare_by_face(img, do_border=do_border)
+        if why:
+            return out, why
 
     # ⚠️ 只在前面真的动过才去边。原图都没处理成功的时候，
     #    画面里还有墙和桌子，方差图切出来的不是花边是整张照片。
