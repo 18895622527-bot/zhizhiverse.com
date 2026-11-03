@@ -81,7 +81,7 @@ def _letterbox(img):
     return canvas, s, ox, oy
 
 
-def _call(key, image_ref, w, h, timeout=30):
+def _call(key, image_ref, w, h, timeout=8):
     """照 zzPhotoTell.look：原生接口，模型降级。回文字；两个模型都不行就抛。"""
     messages = [{'role': 'user', 'content': [
         {'type': 'image_url', 'image_url': {'url': image_ref}},
@@ -187,7 +187,8 @@ def locate(img, faces=None, key=None, url=''):
         notes.append('A:error:' + str(e)[:120])
 
     # 路 B：接口不收 base64 的话，给原图的临时地址。坐标按像素或千分比猜。
-    if url:
+    # ⚠️ 2026-11-03 默认关：实测路 A 失败时路 B 也没救回过一张，白花 2~3 秒。环境变量 VL_ROUTE_B=1 可开。
+    if url and os.environ.get('VL_ROUTE_B', '0') == '1':
         try:
             text = _call(key, url, w, h)
             q = _parse(text)
