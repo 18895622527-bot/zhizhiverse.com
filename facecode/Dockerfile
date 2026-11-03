@@ -80,8 +80,8 @@ RUN set -e; \
     mkdir -p weights/CodeFormer weights/facelib weights/realesrgan; \
     H=${HF_HOST}/sczhou/CodeFormer/resolve/main; \
     G=https://github.com/sczhou/CodeFormer/releases/download/v0.1.0; \
-    dl() { curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 -o "$1" "$H/$2" \
-        || curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 -o "$1" "$G/$3"; }; \
+    dl() { { [ -n "${HF_HOST}" ] && curl -fsSL --retry 2 --connect-timeout 20 --max-time 300 -o "$1" "$H/$2"; } \
+        || curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 -o "$1" "$G/$3"; }; \
     dl weights/CodeFormer/codeformer.pth            codeformer.pth                        codeformer.pth; \
     dl weights/facelib/detection_Resnet50_Final.pth facelib/detection_Resnet50_Final.pth  detection_Resnet50_Final.pth; \
     dl weights/facelib/parsing_parsenet.pth         facelib/parsing_parsenet.pth          parsing_parsenet.pth; \

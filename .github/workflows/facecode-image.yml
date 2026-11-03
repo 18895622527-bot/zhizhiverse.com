@@ -70,7 +70,7 @@ jobs:
             PIP_INDEX=https://pypi.org/simple
             PIP_HOST=pypi.org
             TORCH_INDEX=https://download.pytorch.org/whl/cu118/
-            HF_HOST=https://huggingface.co
+            HF_HOST=
 
       - name: 结果
         run: echo "推好了：${ACR_IMAGE}:latest 和 ${ACR_IMAGE}:${GITHUB_SHA}"
