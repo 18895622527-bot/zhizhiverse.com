@@ -1,0 +1,78 @@
+# ============================================================
+# 吱吱留影 —— 人脸修复镜像（facecode）由 GitHub 打包，推进阿里云 ACR
+#
+# 【为什么不用 ACR 自己的「代码源构建」】
+#   2026-11-03 实测：ACR 杭州构建机一次任务封顶 1 小时，下载只有 577 kB/s，
+#   torch 的 2.2GB 轮子都下不完（3605 秒被杀）。GitHub 的机器不限速，6 小时上限，
+#   同一个 Dockerfile 十几二十分钟打完，直接推到 ACR 仓库，FC 从仓库选镜像。
+#
+# 【要在 GitHub 仓库 Settings → Secrets and variables → Actions 里填三个 secret】
+#   ACR_IMAGE     镜像仓库的公网地址，ACR 仓库「基本信息」页上抄，形如
+#                 zhizhiwu-registry.cn-hangzhou.cr.aliyuncs.com/<命名空间>/facecode
+#   ACR_USERNAME  ACR「访问凭证」页上的用户名
+#   ACR_PASSWORD  ACR「访问凭证」页上设的固定密码
+#
+# 【怎么触发】
+#   facecode/ 下有改动推上来就自动跑；也可以在 Actions 页点 Run workflow 手动跑。
+#   打出来两个标签：latest 和 本次提交的短 hash。FC 上先用 latest；
+#   ⚠️ FC 按 Digest 记镜像，latest 被覆盖后 FC 那边要重新选一次（或者直接选 hash 标签）。
+# ============================================================
+name: facecode-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/ios-launch-handoff-9uin19, main]
+    paths:
+      - 'facecode/**'
+      - '.github/workflows/facecode-image.yml'
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # GitHub 的机器系统盘只剩 20GB 左右，镜像展开有 8GB，先把用不上的预装软件删了腾地方
+      - name: 腾出磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af || true
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 ACR
+        run: |
+          REG="${ACR_IMAGE%%/*}"
+          echo "$ACR_PASSWORD" | docker login "$REG" -u "$ACR_USERNAME" --password-stdin
+        env:
+          ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+
+      - name: 打镜像并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: facecode
+          file: facecode/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ secrets.ACR_IMAGE }}:latest
+            ${{ secrets.ACR_IMAGE }}:${{ github.sha }}
+          # 境外机器：全部走官方源
+          build-args: |
+            BASE_IMAGE=python:3.10-slim-bookworm
+            APT_MIRROR=
+            PIP_INDEX=https://pypi.org/simple
+            PIP_HOST=pypi.org
+            TORCH_INDEX=https://download.pytorch.org/whl/cu118/
+            HF_HOST=https://huggingface.co
+
+      - name: 结果
+        run: echo "推好了：${ACR_IMAGE}:latest 和 ${ACR_IMAGE}:${GITHUB_SHA}"
+        env:
+          ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
