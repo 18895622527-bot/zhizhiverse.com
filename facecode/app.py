@@ -160,9 +160,11 @@ def _auth_ok():
     """⚠️ 这个接口挂在公网上，而且每次调用都烧 GPU 的钱。
        不加校验等于把你的信用卡放在路边。
        FC 的 HTTP 触发器可以配「无认证」图省事，所以这一道闸必须在应用层自己把。
-       部署时在函数的环境变量里设 FC_SHARED_TOKEN，
+       部署时在函数的环境变量里设 ZZ_SHARED_TOKEN（FC_ 开头是阿里保留前缀，不让用），
        腾讯云那边的 zzFaceCode 带同一个值。"""
-    want = os.environ.get('FC_SHARED_TOKEN', '')
+    # ⚠️ 2026-11-03：阿里云 FC 不让用 FC_ 开头的环境变量名（保留前缀），改叫 ZZ_SHARED_TOKEN。
+    #    本地调试还认旧名字。
+    want = os.environ.get('ZZ_SHARED_TOKEN', '') or os.environ.get('FC_SHARED_TOKEN', '')
     if not want:
         return True   # 没设就不校验，方便本地调试；线上一定要设
     return request.headers.get('X-ZZ-Token', '') == want
