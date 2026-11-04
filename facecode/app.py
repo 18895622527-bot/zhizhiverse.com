@@ -249,9 +249,21 @@ def enhance():
         if DEVICE == 'cuda':
             torch.cuda.empty_cache()
 
+        # ⚠️ 顺手给一张【修好之后】的真灰度图。
+        #    百度上色只吃黑白：褪色发黄的老照片在它眼里「已经是彩色的」，它不会动。
+        #    之前裁剪那一步出过一张灰度图，但那是修脸【之前】的 —— 拿它去上色等于把修好的脸扔了。
+        #    所以修完这里再出一张，调用方上色就喂这张。2026-11-04。
+        gray_b64 = ''
+        if body.get('gray', True):
+            g = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+            okg, bufg = cv2.imencode('.jpg', g, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
+            if okg:
+                gray_b64 = base64.b64encode(bufg.tobytes()).decode('ascii')
+
         return jsonify(
             ok=True,
             image=base64.b64encode(buf.tobytes()).decode('ascii'),
+            gray=gray_b64,
             faces=n,
             w=w,
             # ⚠️ 动没动、怎么动的，原样带回去。
