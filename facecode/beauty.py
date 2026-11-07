@@ -27,8 +27,10 @@ LEFT_BROW = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46]
 RIGHT_BROW = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276]
 LIPS = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
 # 瘦脸推的点：左右下颌 / 腮
-SLIM_L = [132, 58, 172, 136, 150]
-SLIM_R = [361, 288, 397, 365, 379]
+# ⚠️ 2026-11-07 第一版推 5 个点、每点 6%，叠加后把耳下的头发和暗背景拖进脸里，下颌出黑道。
+#    现在每边只推下颌转角附近 2 个点，力度 3%，半径放大到脸宽 0.25，过渡更平。
+SLIM_L = [172, 136]
+SLIM_R = [397, 365]
 NOSE_TIP = 4
 
 _MESH = {}
@@ -183,12 +185,12 @@ def beautify(img, k=0.7):
             for i in SLIM_L + SLIM_R:
                 c = p[i]
                 v = ctr - c
-                m = c + v * (0.06 * k)            # 往鼻尖方向推 6%·k 的距离
-                out = _local_translate(out, c, m, fw * 0.16)
+                m = c + v * (0.035 * k)           # 往鼻尖方向推 3.5%·k 的距离
+                out = _local_translate(out, c, m, fw * 0.25)
             for eye in (LEFT_EYE, RIGHT_EYE):
                 ec = p[eye].mean(axis=0)
                 ew = float(np.ptp(p[eye][:, 0]))
-                out = _local_scale(out, ec, ew * 0.9, 0.10 * k)
+                out = _local_scale(out, ec, ew * 0.9, 0.07 * k)
         notes += ['slim', 'eye']
         fs = faces(out) or fs                     # 形变之后重新取点
     except Exception as e:
@@ -201,10 +203,11 @@ def beautify(img, k=0.7):
             mask = np.maximum(mask, _skin_mask(out.shape, p))
         m3 = mask[:, :, None]
         f = out.astype(np.float32)
-        smooth = cv2.bilateralFilter(out, 0, 30 + 30 * k, 7 + 5 * k).astype(np.float32)
-        detail = f - cv2.GaussianBlur(f, (0, 0), 1.2)    # 一点高频加回来，皮肤不塑料
-        sk = smooth + detail * 0.35
-        f = f * (1 - m3 * (0.75 * k)) + sk * (m3 * (0.75 * k))
+        # ⚠️ 第一版混 0.75、细节只回 0.35，像蜡像。现在混 0.5、细节回 0.6，留住老照片的颗粒
+        smooth = cv2.bilateralFilter(out, 0, 20 + 20 * k, 5 + 3 * k).astype(np.float32)
+        detail = f - cv2.GaussianBlur(f, (0, 0), 1.2)
+        sk = smooth + detail * 0.6
+        f = f * (1 - m3 * (0.5 * k)) + sk * (m3 * (0.5 * k))
         lab = cv2.cvtColor(np.clip(f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
         L = lab[:, :, 0]
         lab[:, :, 0] = L + (255.0 - L) * (0.13 * k) * mask         # 皮肤提亮（0.22 太白，像戴面具）
