@@ -96,6 +96,97 @@ def _shrink(img):
     return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
 
 
+# ---------------------------------------------------------------
+# 美颜（2026-11-07）
+# 李总：「大家修老照片，也是想自己的过去变好看一点，不要只是还原。」
+# 比过 CodeFormer 保真度 w=0.7/0.5/0.3 三档，三张几乎一样 —— 问题不在五官，
+# 在【颜色】：整张偏冷偏灰，皮肤发青黄，嘴唇发灰紫。所以美颜做的是修完之后调一次色：
+#   ① 灰世界白平衡（只拉回一半，别矫枉过正）
+#   ② 往暖一点：R 加一点、B 减一点 —— 皮肤和嘴唇回到正常血色
+#   ③ 脸上轻微磨皮：双边滤波按 0~1 混回去，只在 CodeFormer 找到的脸框里做
+#   ④ L 通道轻微 CLAHE + 整体提亮一点
+# 黑白照片（饱和度很低）跳过 ①② —— 黑白照不许被染上颜色，只做 ③④。
+# strength 0~1，默认 0.6。调用方传 beauty:0 关掉。
+# ---------------------------------------------------------------
+def _is_gray(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    return float(np.mean(hsv[:, :, 1])) < 18.0
+
+
+def _beauty(img, face_boxes, strength=0.6):
+    k = max(0.0, min(1.0, float(strength)))
+    if k <= 0:
+        return img, ''
+    out = img.astype(np.float32)
+    gray = _is_gray(img)
+    notes = []
+    if not gray:
+        # ① 白平衡：每个通道往三通道均值拉，拉一半
+        means = out.reshape(-1, 3).mean(axis=0)
+        avg = float(means.mean())
+        gain = 1.0 + (avg / np.maximum(means, 1.0) - 1.0) * (0.5 * k)
+        out = out * gain.reshape(1, 1, 3)
+        # ② 暖一点（BGR）
+        out[:, :, 2] *= (1.0 + 0.05 * k)
+        out[:, :, 0] *= (1.0 - 0.04 * k)
+        notes.append('wb+warm')
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    # ③ 脸上磨皮
+    h, w = out.shape[:2]
+    for b in face_boxes or []:
+        x0, y0, x1, y1 = [int(v) for v in b[:4]]
+        pad = int(0.15 * max(x1 - x0, y1 - y0))
+        x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
+        x1, y1 = min(w, x1 + pad), min(h, y1 + pad)
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            continue
+        roi = out[y0:y1, x0:x1]
+        d = max(5, int(0.03 * (x1 - x0)) | 1)
+        smooth = cv2.bilateralFilter(roi, d, 40, 40)
+        # 椭圆羽化遮罩，边缘渐变，不出方框
+        m = np.zeros(roi.shape[:2], np.float32)
+        cv2.ellipse(m, ((x1 - x0) // 2, (y1 - y0) // 2), ((x1 - x0) // 2, (y1 - y0) // 2), 0, 0, 360, 1.0, -1)
+        m = cv2.GaussianBlur(m, (0, 0), max(3, (x1 - x0) / 12.0)) * (0.55 * k)
+        m = m[:, :, None]
+        out[y0:y1, x0:x1] = (roi * (1 - m) + smooth * m).astype(np.uint8)
+    if face_boxes:
+        notes.append('smooth')
+    # ③' 嘴唇补一点血色：只在嘴唇那一圈、只对彩色照片。Lab 的 a 通道（偏红）加一点，饱和一点
+    #     2026-11-07 李总看样片：「嘴唇的颜色上面都染了什么，嘴唇的颜色都不好」
+    if not gray:
+        try:
+            import crop as _crop
+            fs = _crop.landmarks(out)
+            if fs:
+                lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB).astype(np.float32)
+                mask = np.zeros(out.shape[:2], np.float32)
+                for f in fs:
+                    lp = f.get('lips')
+                    if lp is not None and len(lp) >= 6:
+                        cv2.fillPoly(mask, [lp.astype(np.int32)], 1.0)
+                if mask.max() > 0:
+                    span = max(3.0, float(np.sqrt(mask.sum())) / 10.0)
+                    mask = cv2.GaussianBlur(mask, (0, 0), span)
+                    lab[:, :, 1] += mask * (10.0 * k)      # 往红
+                    lab[:, :, 2] += mask * (3.0 * k)       # 一点点暖
+                    lab[:, :, 0] -= mask * (3.0 * k)       # 稍深一点，不发白
+                    out = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+                    notes.append('lips')
+        except Exception as le:
+            print('[facecode] 嘴唇那步跳过：', le, flush=True)
+    # ④ 提亮 + 轻微局部对比
+    lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)
+    l = lab[:, :, 0]
+    clahe = cv2.createCLAHE(clipLimit=1.0 + 0.8 * k, tileGridSize=(8, 8))
+    l2 = clahe.apply(l).astype(np.float32)
+    l2 = l * (1 - 0.5 * k) + l2 * (0.5 * k)
+    l2 = np.clip(l2 * (1.0 + 0.04 * k) + 4 * k, 0, 255)
+    lab[:, :, 0] = l2.astype(np.uint8)
+    out = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    notes.append('tone')
+    return out, ('beauty' + ('-gray' if gray else '') + ':' + '+'.join(notes))
+
+
 # ⚠️ 摆正/裁剪/去花边/人脸定位全在 crop.py 里。
 #    它只依赖 OpenCV，不需要 GPU，也不需要 PyTorch ——
 #    所以同一个文件可以单独跑在腾讯云 SCF 的轻量 Python 函数上，
@@ -242,6 +333,19 @@ def enhance():
         _helper.get_inverse_affine(None)
         result = _helper.paste_faces_to_input_image(upsample_img=None)
 
+        # 美颜：调色 + 脸上轻微磨皮。默认开 0.6，调用方传 beauty:0 关掉（见 _beauty 上面的说明）
+        beauty_note = ''
+        try:
+            bk = float(body.get('beauty', 0.6))
+        except Exception:
+            bk = 0.6
+        if bk > 0:
+            try:
+                boxes = [b[:4] for b in (getattr(_helper, 'det_faces', None) or [])]
+                result, beauty_note = _beauty(result, boxes, bk)
+            except Exception as be:
+                print('[facecode] 美颜出错，跳过：', be, flush=True)
+
         ok, buf = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
         if not ok:
             return jsonify(ok=False, msg='结果图编码失败'), 500
@@ -272,6 +376,7 @@ def enhance():
             #    fix 的取值：'' 没动 / 'crop' 只裁了 / 'deskew -2.6°+border' 摆正并去了花边
             #              / 后面还可能接 '+recomp'（重新构图）'+bg'（换了背景）
             fix=did_fix,
+            beauty=beauty_note,
             size=[img.shape[1], img.shape[0]],
             ms=int((time.time() - t0) * 1000))
     except Exception as e:

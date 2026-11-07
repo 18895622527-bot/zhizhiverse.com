@@ -458,6 +458,9 @@ def _mp():
         return None
 
 
+LIP_OUTER = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
+
+
 def landmarks(img):
     """返回每张脸的 {eye_l, eye_r, chin, tilt}（像素坐标），没检出就空列表。
     关键点编号是 mediapipe face mesh 的：左眼 33/133，右眼 362/263，下巴 152。"""
@@ -473,7 +476,9 @@ def landmarks(img):
         re = np.mean([p[362], p[263]], axis=0)
         out.append({
             'eye_l': le, 'eye_r': re, 'chin': np.array(p[152]),
-            'tilt': float(np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0])))
+            'tilt': float(np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0]))),
+            # 外嘴唇轮廓一圈（mediapipe face mesh 编号）。2026-11-07 美颜给嘴唇补血色用，别的地方不用它
+            'lips': np.array([p[i] for i in LIP_OUTER], dtype=np.float32)
         })
     return out
 
