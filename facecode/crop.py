@@ -363,6 +363,52 @@ def strip_border(img, min_keep=0.35, max_keep=0.97):
         return None
 
 
+def trim_bottom_paper(img, zone=0.30, row_frac=0.55, min_band=0.015):
+    """去掉照片【底下】那条相纸白边（以及白边下面露出来的相册、桌面）。回新的下沿 y，不用切就回 None。
+
+    ⚠️ 2026-11-07 一张相册里的合影：底下锯齿白边 + 粉色相册纸有花纹，strip_border 当成照片内容留下了。
+    【怎么认】一行里一半以上的像素「又亮又平」（灰度 > 170，局部标准差 < 10）= 这一行是相纸。
+             在最下面 30% 里，从上往下找第一段连续的相纸行（至少 1.5% 高），而且它上面紧挨着的是有内容的行，
+             就从这段的上沿切。
+    【只切下边】上边和左右常常是照片里本来的浅色背景（影楼背景布、墙），也是又亮又平，切了就伤内容。
+             肖像照的下边是衣服，几乎不会整行又亮又平。"""
+    try:
+        h, w = img.shape[:2]
+        if h < 120:
+            return None
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        k = 9
+        mean = cv2.blur(g, (k, k))
+        sd = np.sqrt(np.maximum(cv2.blur(g * g, (k, k)) - mean * mean, 0))
+        paper = ((g > 170) & (sd < 10)).mean(axis=1) > row_frac
+        # 左中右三段分开算「偏亮的像素占多少」：照片略斜时白边一头高一头低，整行平均会把高的那头平均掉
+        third = max(1, w // 3)
+        bright = np.max(np.stack([(g[:, i * third:(i + 1) * third] > 135).mean(axis=1) for i in range(3)]), axis=0)
+        y_start = int(h * (1.0 - zone))
+        need = max(3, int(h * min_band))
+        y = y_start
+        while y < h:
+            if paper[y]:
+                e = y
+                while e < h and paper[e]:
+                    e += 1
+                if e - y >= need:
+                    above = paper[max(0, y - need):y]
+                    if len(above) and not above.any():
+                        # 白边上沿是一段渐变（照片略斜、锯齿），往上退到渐变开始的地方，别留一条亮线
+                        lim = max(y_start, y - int(0.04 * h))
+                        while y > lim and bright[y - 1] > 0.25:
+                            y -= 1
+                        return y
+                y = e
+            else:
+                y += 1
+        return None
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
 def _ring_ratio(img, band=0.12):
     """画面四周一圈的方差 ÷ 中心区域的方差。
 
@@ -450,6 +496,9 @@ def _mp():
             static_image_mode=True, max_num_faces=6, refine_landmarks=True,
             min_detection_confidence=0.4)
         _MP['seg'] = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        # 2026-11-07 给构图数人头用的第二个检测器。face mesh 在合影里会漏脸（侧着、靠在一起的那张），
+        # 漏了就会被当成单人照裁成一个人。两个检测器有一个说「不止一个人」就不构图。
+        _MP['det'] = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
         _MP['ok'] = True
         return _MP
     except Exception as e:
@@ -493,6 +542,11 @@ def recompose(img):
     fs = landmarks(img)
     if len(fs) != 1:
         return img, ''
+    # ⚠️ 2026-11-07：合影被裁成一个人（女方被裁掉）。face mesh 只认出了男方，
+    #    这里再用 BlazeFace 数一遍，不止一张脸就整张保留，不构图。
+    if count_faces(img) > 1:
+        print('[crop] 检测到不止一张脸，不构图', flush=True)
+        return img, ''
     f = fs[0]
     h, w = img.shape[:2]
     mid = (f['eye_l'] + f['eye_r']) / 2.0
@@ -529,6 +583,46 @@ def recompose(img):
     return out, note + 'recomp'
 
 
+def count_faces(img):
+    """BlazeFace 数脸（缩到 640 以内）。出错回 0，调用方当「不知道」处理。"""
+    m = _mp()
+    if not m or 'det' not in m:
+        return 0
+    try:
+        h, w = img.shape[:2]
+        sc = 640.0 / max(h, w)
+        sm = cv2.resize(img, (max(1, int(w * sc)), max(1, int(h * sc))), interpolation=cv2.INTER_AREA) if sc < 1 else img
+        r = m['det'].process(cv2.cvtColor(sm, cv2.COLOR_BGR2RGB))
+        return len(r.detections or [])
+    except Exception:
+        return 0
+
+
+# face mesh 脸外圈 36 个点（额头 → 右脸 → 下巴 → 左脸）
+FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
+             152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+
+
+def _face_keep_mask(img, k):
+    """每张脸的外轮廓填满，往里收 2% 再羽化 —— 羽化只发生在脸里面，不把外面的纸色带进来。
+    回 0~1 的 float32 图；没检出脸回 None。"""
+    m = _mp()
+    if not m:
+        return None
+    h, w = img.shape[:2]
+    r = m['mesh'].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    keep = None
+    for fl in (r.multi_face_landmarks or []):
+        pts = np.array([(fl.landmark[i].x * w, fl.landmark[i].y * h) for i in FACE_OVAL], np.int32)
+        face = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(face, [pts], 255)
+        shrink = max(2, int(0.02 * (pts[:, 0].max() - pts[:, 0].min())))
+        face = cv2.erode(face, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * shrink + 1, 2 * shrink + 1)))
+        face = cv2.GaussianBlur(face.astype(np.float32) / 255.0, (k, k), 0)
+        keep = face if keep is None else np.maximum(keep, face)
+    return keep
+
+
 def clean_bg(img, color=(188, 176, 160), feather=9):
     """人像分割 + 柔边 + 换成影楼式浅灰渐变背景（上浅下深）。
     ⚠️ 颜色是 BGR。默认这个暖灰跟首页的纸色是一家的，印出来不突兀。
@@ -543,7 +637,16 @@ def clean_bg(img, color=(188, 176, 160), feather=9):
         return img, ''
     k = feather * 2 + 1
     mask = cv2.GaussianBlur(mask, (k, k), 0)
-    mask = np.clip((mask - 0.25) / 0.5, 0, 1)[..., None]
+    mask = np.clip((mask - 0.25) / 0.5, 0, 1)
+    # ⚠️ 2026-11-07 李总：「右脸像是少了一块」。脸很白、背景纸也很白的时候，分割把脸颊边当成背景抹成了灰蓝，
+    #    后面 CodeFormer 按缺了一块的脸去修，轮廓就往里缩。所以脸的外轮廓里面一律保留原样。
+    try:
+        keep = _face_keep_mask(img, k)
+        if keep is not None:
+            mask = np.maximum(mask, keep)
+    except Exception as fe:
+        print('[crop] 保护脸轮廓那步跳过：%s' % str(fe)[:120], flush=True)
+    mask = mask[..., None]
     # 人太少说明分割失败，别把整张图糊成一块灰
     if float(mask.mean()) < 0.08:
         return img, ''

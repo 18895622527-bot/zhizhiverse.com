@@ -187,6 +187,43 @@ def _beauty(img, face_boxes, strength=0.6):
     return out, ('beauty' + ('-gray' if gray else '') + ':' + '+'.join(notes))
 
 
+# ---------------------------------------------------------------
+# 调明暗（2026-11-07 李总：「整体色调能不能明亮一点，精神气足一点」，拿 MyHeritage 的对比）
+#   放在修脸【之后】：试过放在修脸之前，CodeFormer 会把黑白照的眼睛修出一点蓝色，之后去偏色正好把它洗掉。
+#   只动明暗和偏色，不动形状，不上色。彩色照片的颜色一点不动（只有黑白照才去偏色）。
+#   调用方传 tone:0 关掉。
+# ---------------------------------------------------------------
+def _tone(img, k=1.0):
+    """修完之后调一次明暗：拉开黑白场（高光留余量）+ 中间调提亮 + 局部对比 + 去偏色。不动形状，不加颜色。"""
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L, A, B = lab[..., 0], lab[..., 1], lab[..., 2]
+    lo, hi = np.percentile(L, 0.5), np.percentile(L, 99.0)
+    if hi - lo > 20:
+        Ln = np.clip((L - lo) * 245.0 / (hi - lo), 0, 255)
+        L = L * (1 - 0.8 * k) + Ln * 0.8 * k
+    # 中间调提亮
+    L = 255.0 * np.power(np.clip(L / 255.0, 0, 1), 1.0 - 0.10 * k)
+    # 高光肩部：205 以上慢慢收，脸和背景不冲成一片白
+    sh = 205.0
+    over = L > sh
+    L[over] = sh + (L[over] - sh) * 0.55
+    # 一点局部对比（五官、头发更立体）
+    L8 = np.clip(L, 0, 255).astype(np.uint8)
+    cl = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(8, 8)).apply(L8).astype(np.float32)
+    L = L * (1 - 0.35 * k) + cl * 0.35 * k
+    # 去偏色【只对黑白照】：看画面中间那块 a 通道（红绿）的起伏 —— 黑白照里人脸、衣服、背景都是同一层色，起伏很小；
+    # 彩色照片里皮肤和衣服颜色不一样，起伏大。实测黑白 1.6~2.4，彩色 5.9~6.9，界线取 3.5。
+    # 彩色照片的颜色一点不动（2026-11-07 试过整体拉中性，证件照老人的肤色被洗成了灰）。
+    h, w = L.shape
+    ca = A[int(h * .2):int(h * .8), int(w * .2):int(w * .8)]
+    if float(ca.std()) < 3.5:
+        A = 128 + (A - 128) * (1 - 0.5 * k); B = 128 + (B - 128) * (1 - 0.5 * k)
+        A = A - (A.mean() - 128) * 0.6 * k
+        B = B - (B.mean() - 128) * 0.6 * k
+    lab = np.stack([L, A, B], -1)
+    return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
 # ⚠️ 摆正/裁剪/去花边/人脸定位全在 crop.py 里。
 #    它只依赖 OpenCV，不需要 GPU，也不需要 PyTorch ——
 #    所以同一个文件可以单独跑在腾讯云 SCF 的轻量 Python 函数上，
@@ -339,14 +376,26 @@ def enhance():
         #   默认 0.7，调用方传 beauty:0 关掉。出错就跳过，修复结果照样返回。
         beauty_note = ''
         try:
-            bk = float(body.get('beauty', 0.7))
+            bk = float(body.get('beauty', 0))
         except Exception:
-            bk = 0.7
+            bk = 0   # 2026-11-07 美颜不做了，默认关（调用方不传就是关）
         if bk > 0:
             try:
                 result, beauty_note = beauty.beautify(result, bk)
             except Exception as be:
                 print('[facecode] 美颜出错，跳过：', be, flush=True)
+
+        tone_note = ''
+        try:
+            tk = float(body.get('tone', 1.0))
+        except Exception:
+            tk = 1.0
+        if tk > 0:
+            try:
+                result = _tone(result, min(1.0, tk))
+                tone_note = 'tone'
+            except Exception as te:
+                print('[facecode] 调明暗出错，跳过：', te, flush=True)
 
         ok, buf = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
         if not ok:
@@ -379,6 +428,7 @@ def enhance():
             #              / 后面还可能接 '+recomp'（重新构图）'+bg'（换了背景）
             fix=did_fix,
             beauty=beauty_note,
+            tone=tone_note,
             size=[img.shape[1], img.shape[0]],
             ms=int((time.time() - t0) * 1000))
     except Exception as e:

@@ -62,6 +62,47 @@ def det_score(img):
         return 0.0
 
 
+def _blaze_boxes(img, conf=0.6):
+    """BlazeFace（远距离模型）找脸，回 [(x,y,w,h)] 原图像素。
+    ⚠️ 2026-11-07：一张两人合影，face mesh 只认出男方，BlazeFace 和 Haar 都认出了两个人。
+       按 mesh 的结果裁，女方被裁掉了。所以按脸裁之前用它补一遍漏掉的脸。"""
+    try:
+        if 'd1' not in _DET:
+            import mediapipe as mp
+            _DET['d1'] = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=conf)
+        h, w = img.shape[:2]
+        sc = min(1.0, 1000.0 / max(h, w))
+        sm = cv2.resize(img, (max(1, int(w * sc)), max(1, int(h * sc))), interpolation=cv2.INTER_AREA) if sc < 1 else img
+        r = _DET['d1'].process(cv2.cvtColor(sm, cv2.COLOR_BGR2RGB))
+        out = []
+        for d in (r.detections or []):
+            if d.score[0] < conf:
+                continue
+            b = d.location_data.relative_bounding_box
+            x, y, bw, bh = b.xmin * w, b.ymin * h, b.width * w, b.height * h
+            if bw < 0.03 * min(h, w):   # 太小的不算（衣服花纹、纽扣）
+                continue
+            out.append((int(x), int(y), int(bw), int(bh)))
+        return out
+    except Exception:
+        return []
+
+
+def _merge_faces(img, fs):
+    """mesh 的脸 + BlazeFace 补上的、mesh 漏掉的脸。"""
+    out = [tuple(int(v) for v in f[:4]) for f in fs]
+    for b in _blaze_boxes(img):
+        cx, cy = b[0] + b[2] / 2.0, b[1] + b[3] / 2.0
+        if any(f[0] - 0.25 * f[2] <= cx <= f[0] + 1.25 * f[2] and f[1] - 0.25 * f[3] <= cy <= f[1] + 1.25 * f[3] for f in out):
+            continue
+        out.append(b)
+    return out
+
+
+def _count_faces(img):
+    return max(len(_faces_lm(img)), len(_blaze_boxes(img)))
+
+
 def find_faces_small(img):
     """Haar 在缩到 600px 的图上找正脸。只用来判「这个方向有没有正着的脸」。"""
     h, w = img.shape[:2]
@@ -109,6 +150,10 @@ def orient(img):
         #    转完画布会被补边撑大一圈，脸相对又变小，读不出来了 —— 所以读在前、转在后。
         fs0 = _faces_lm(roi)
         a = float(np.median([f[4] for f in fs0])) if fs0 else float(a)
+        # ⚠️ 2026-11-07：合影里 mesh 只认出一个人，按他歪着的头把整张照片转了 -9°，后面去白边全乱了。
+        #    BlazeFace 数出不止一张脸 = 合影 —— 合影只认 90° 的粗方向，不按头的角度细转（和下面的规矩一致）。
+        if len(_blaze_boxes(roi)) >= 2:
+            a = float(round(a / 90.0) * 90.0)
         r = crop.rotate_keep(roi, a) if abs(a) > 1 else roi
         fs = _faces_lm(r)
         if not fs:
@@ -129,7 +174,8 @@ def orient(img):
     #   多人：所有人歪的方向一致（极差 ≤ 10°）且中位数超过 5° 才转 —— 合影里头靠在一起是姿势，不是纸歪
     #   转完再读一次，没变正就不认
     spread = max(tilts) - min(tilts)
-    if len(fs) >= 2:
+    # mesh 漏脸时（合影里常见）用 BlazeFace 再数一遍，不止一张脸就按合影处理
+    if len(fs) >= 2 or len(_blaze_boxes(r)) >= 2:
         # 合影【不做细调】。试过两种证据（眼睛倾角中位数、脸连线倾角）—— 两个人一高一矮、
         # 头互相靠着，两种证据都会说「歪了」，把一张正的合影转歪（2026-11-03 相册页那张，连着两版）。
         # 合影的纸歪了几度，交给「是这张吗？」那一步让用户拖一下，比转错安全。90°/180° 粗方向照常处理。
@@ -175,12 +221,16 @@ def locate(img, fs, allow_paper=True, strict_keep=True):
             if n == 0 or _keeps_faces(sub, n):
                 return sub, 'paper'
     if n:
-        box = crop.face_crop(img, [(f[0], f[1], f[2], f[3]) for f in fs])
+        allf = _merge_faces(img, fs)
+        if len(allf) > n:
+            print('[pipe] mesh 认出 %d 张脸，BlazeFace 补到 %d 张' % (n, len(allf)), flush=True)
+        box = crop.face_crop(img, allf)
         if box:
             sub = img[box[1]:box[3], box[0]:box[2]]
             keep = float(sub.shape[0] * sub.shape[1]) / float(img.shape[0] * img.shape[1])
             # 已经是一张构图好的人像时，按脸裁只会再切掉一圈 —— 裁不掉四成以上就不值得动
-            if (not strict_keep or keep <= 0.6) and _keeps_faces(sub, n):
+            # ⚠️ 裁完还得装得下【所有】脸（两种检测器里多的那个数），少一张就不裁
+            if (not strict_keep or keep <= 0.6) and _count_faces(sub) >= len(allf):
                 return sub, 'faces'
     return img, ''
 
@@ -222,6 +272,13 @@ def run(img, quad=None, do_border=True):
             if not fs or _keeps_faces(sub, len(fs)):
                 out = sub
                 note.append('border')
+        # 底下还剩一条相纸白边（相册里的照片常见）就再切一刀；切完脸一张都不能少
+        yb = crop.trim_bottom_paper(out)
+        if yb:
+            sub = out[:yb]
+            if not fs or _count_faces(sub) >= _count_faces(out):
+                out = sub
+                note.append('bottom')
     if not note or (len(note) == 1 and note[0].startswith('orient0')):
         return img, ''
     return out, '+'.join(note)
