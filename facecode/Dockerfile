@@ -90,11 +90,11 @@ RUN set -e; \
     test "$(stat -c %s weights/CodeFormer/codeformer.pth)" -gt 300000000
 
 # ⚠️ crop.py / pipe.py 必须一起拷。app.py 开头就 import 它们。
-COPY app.py crop.py pipe.py /app/
+COPY app.py crop.py pipe.py beauty.py /app/
 WORKDIR /app
 
 # 构建时自检：所有 import 都能过。别等到 FC 上才 500。
-RUN python -c "import sys; sys.path.insert(0,'/app/CodeFormer'); import torch, cv2, numpy, mediapipe, flask; from basicsr.utils.registry import ARCH_REGISTRY; from facelib.utils.face_restoration_helper import FaceRestoreHelper; import crop, pipe; assert str(torch.version.cuda).startswith('11.8'), 'torch 不是 cu118 版: %s' % torch.version.cuda; print('selfcheck ok, torch', torch.__version__, 'cuda build', torch.version.cuda)"
+RUN python -c "import sys; sys.path.insert(0,'/app/CodeFormer'); import torch, cv2, numpy, mediapipe, flask; from basicsr.utils.registry import ARCH_REGISTRY; from facelib.utils.face_restoration_helper import FaceRestoreHelper; import crop, pipe, beauty; assert str(torch.version.cuda).startswith('11.8'), 'torch 不是 cu118 版: %s' % torch.version.cuda; print('selfcheck ok, torch', torch.__version__, 'cuda build', torch.version.cuda)"
 
 ENV FC_SERVER_PORT=9000
 EXPOSE 9000

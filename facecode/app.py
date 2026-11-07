@@ -193,6 +193,7 @@ def _beauty(img, face_boxes, strength=0.6):
 #    不用为了裁张照片养一个 7GB 的容器镜像。
 #    这里 import 它，GPU 这条路一行都不用改。
 from crop import beautify as crop_beautify  # noqa: E402
+import beauty  # noqa: E402  美颜：瘦脸 / 大眼 / 磨皮美白（2026-11-07）
 import pipe  # noqa: E402  一条直线的预处理（定方向 → 定位 → 裁 → 验证），和腾讯云 SCF 上跑的是同一份
 
 
@@ -333,16 +334,17 @@ def enhance():
         _helper.get_inverse_affine(None)
         result = _helper.paste_faces_to_input_image(upsample_img=None)
 
-        # 美颜：调色 + 脸上轻微磨皮。默认开 0.6，调用方传 beauty:0 关掉（见 _beauty 上面的说明）
+        # 美颜（2026-11-07 李总：照美图秀秀那样，脸型圆润一点、皮肤亮白一点、五官微调）
+        #   瘦脸 + 大眼 + 皮肤磨皮美白 + 彩色照片嘴唇补血色，每张脸都做。见 beauty.py。
+        #   默认 0.7，调用方传 beauty:0 关掉。出错就跳过，修复结果照样返回。
         beauty_note = ''
         try:
-            bk = float(body.get('beauty', 0.6))
+            bk = float(body.get('beauty', 0.7))
         except Exception:
-            bk = 0.6
+            bk = 0.7
         if bk > 0:
             try:
-                boxes = [b[:4] for b in (getattr(_helper, 'det_faces', None) or [])]
-                result, beauty_note = _beauty(result, boxes, bk)
+                result, beauty_note = beauty.beautify(result, bk)
             except Exception as be:
                 print('[facecode] 美颜出错，跳过：', be, flush=True)
 
