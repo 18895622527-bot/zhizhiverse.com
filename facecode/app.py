@@ -293,6 +293,74 @@ def _descratch(img, min_frac=0.025):
 
 
 # ---------------------------------------------------------------
+# 脸部清理（2026-11-08 李总：「左边的脸弄干净一些，整体的脸部弄干净一些」）
+#   CodeFormer 修完，破损严重的照片脸上还会留原来划痕的印子和霉点。这里只补细长的划痕和孤立的小点，
+#   不磨皮（试过混 0.35 的双边滤波，像蜡像 —— 李总之前就否过），眼、眉、鼻孔、嘴、眉毛以上都不碰。
+#   ⚠️ 只跟着去划痕一起触发（照片破损严重才做）。完好的照片上，皱纹、痣是这个人本来的样子。
+# ---------------------------------------------------------------
+_FC_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
+        152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+_FC_EYE_L = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+_FC_EYE_R = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466]
+_FC_BROW_L = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46]
+_FC_BROW_R = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276]
+_FC_LIPS = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
+_FC_NOSE_LOW = [98, 97, 2, 326, 327, 294, 278, 344, 440, 275, 4, 45, 220, 115, 48, 64]
+
+def _face_clean_raw(img, mesh, smooth=0.0):
+    """破损严重的照片：脸上皮肤的划痕、斑点补掉，再轻轻匀一下。眼、眉、鼻孔、嘴不碰。"""
+    h, w = img.shape[:2]
+    r = mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    if not r.multi_face_landmarks:
+        return img, 0
+    out = img.copy()
+    n = 0
+    for fl in r.multi_face_landmarks:
+        P = np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32)
+        fw = float(P[_FC_OVAL][:, 0].max() - P[_FC_OVAL][:, 0].min())
+        if fw < 60: continue
+        skin = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(skin, [P[_FC_OVAL].astype(np.int32)], 255)
+        skin = cv2.erode(skin, np.ones((max(3, int(fw * 0.03)),) * 2, np.uint8))
+        ex = np.zeros((h, w), np.uint8)
+        for poly in (_FC_EYE_L, _FC_EYE_R, _FC_BROW_L, _FC_BROW_R, _FC_LIPS):
+            cv2.fillPoly(ex, [cv2.convexHull(P[poly].astype(np.int32))], 255)
+        cv2.fillPoly(ex, [cv2.convexHull(P[_FC_NOSE_LOW].astype(np.int32))], 255)
+        ex = cv2.dilate(ex, np.ones((max(3, int(fw * 0.045)),) * 2, np.uint8))
+        skin[ex > 0] = 0
+        # 眉毛以上不碰：额头常有刘海（深色细线），会被当成划痕涂成一块灰
+        brow_y = int(max(P[_FC_BROW_L][:, 1].max(), P[_FC_BROW_R][:, 1].max()) + fw * 0.02)
+        skin[:brow_y, :] = 0
+        L = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)[..., 0]
+        k = max(5, int(fw / 28) | 1)
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        dark = cv2.morphologyEx(L, cv2.MORPH_BLACKHAT, ker)
+        bright = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, ker)
+        raw = (((dark > 16) | (bright > 16)) & (skin > 0)).astype(np.uint8)
+        # 只留两种：细长的（划痕）和孤立的小点（霉点）。皮肤本来的纹理是一片一片的，不留
+        cnt, lab, st, _ = cv2.connectedComponentsWithStats(raw, 8)
+        m = np.zeros_like(raw)
+        for i in range(1, cnt):
+            x, y, bw, bh, area = st[i]
+            span = max(bw, bh)
+            if area < 4: continue
+            if (span >= k * 1.5 and area / float(bw * bh) < 0.45) or area <= int(k * k * 0.5):
+                m[lab == i] = 1
+        m = cv2.dilate(m, np.ones((3, 3), np.uint8))
+        if m.sum():
+            out = cv2.inpaint(out, m * 255, 4, cv2.INPAINT_TELEA)
+        if smooth <= 0:
+            n += 1
+            continue
+        bl = cv2.bilateralFilter(out, max(5, int(fw / 45) | 1), 18, 9)
+        a = cv2.GaussianBlur(skin.astype(np.float32) / 255.0, (0, 0), max(2, fw / 60)) * smooth
+        a = a[..., None]
+        out = (out.astype(np.float32) * (1 - a) + bl.astype(np.float32) * a).astype(np.uint8)
+        n += 1
+    return out, n
+
+
+# ---------------------------------------------------------------
 # 眼珠修正（2026-11-08）
 #   褪色严重的老照片，眼睛在原图里发白，CodeFormer 会把眼珠修成浅灰绿 / 灰蓝 —— 看着像外国人的眼睛
 #   （李总之前说过上色「会把人的眼睛也变色」，这是同一类问题）。
@@ -529,6 +597,15 @@ def enhance():
                 result, scratch_note = _descratch(result)
             except Exception as se:
                 print('[facecode] 去划痕出错，跳过：', se, flush=True)
+        if scratch_note:
+            try:
+                import crop as _cropmod
+                _m0 = _cropmod._mp()
+                if _m0:
+                    result, _nf = _face_clean_raw(result, _m0['mesh'])
+                    if _nf: scratch_note += '+face%d' % _nf
+            except Exception as fe:
+                print('[facecode] 脸部清理出错，跳过：', fe, flush=True)
 
         iris_note = ''
         if body.get('iris', True):
