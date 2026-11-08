@@ -225,6 +225,74 @@ def _tone(img, k=1.0):
 
 
 # ---------------------------------------------------------------
+# 去划痕（2026-11-08 李总：「照片上的划痕感能去掉吗？特别头发那一块」）
+#   CodeFormer 只重画脸，头发、背景上的白色划痕原样留着。这里找细长的亮线（形态学 top-hat），用周围补上（inpaint）。
+#   ⚠️ 只管下巴以上、脸的轮廓以外（脸已经修干净了；衣服的条纹、格子会被误认）。只有划痕很密才动。调用方传 descratch:0 关掉。
+# ---------------------------------------------------------------
+_SC_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
+             152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+
+def _scratch_mask(img, mesh=None, thr=14):
+    """细长的亮线（划痕、折痕、霉点连成的线）→ 掩膜。脸的轮廓里面不算（脸已经由 CodeFormer 重画过）。"""
+    h, w = img.shape[:2]
+    L = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)[..., 0]
+    k = max(5, int(round(min(h, w) / 180)) | 1)              # 1400px 的图大约 7~9px
+    th = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    m = (th > thr).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
+    keep = np.zeros_like(m)
+    for i in range(1, n):
+        x, y, bw, bh, area = st[i]
+        span = max(bw, bh)
+        if area < 6: continue
+        # 细长：外接框的长边够长，而且填充率低（线），或者面积很小的亮点（霉点）
+        if (span >= k * 1.6 and area / float(bw * bh) < 0.5) or area <= k * 1.5:
+            keep[lab == i] = 1
+    if mesh is None:
+        return np.zeros_like(keep)
+    r = mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    if not r.multi_face_landmarks:
+        return np.zeros_like(keep)      # 认不出脸就不动：不知道哪儿是头发、哪儿是衣服
+    chin = 0
+    if True:
+        for fl in (r.multi_face_landmarks or []):
+            pts = np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32)
+            oval = pts[_SC_OVAL].astype(np.int32)
+            fm = np.zeros((h, w), np.uint8); cv2.fillPoly(fm, [oval], 1)
+            fm = cv2.dilate(fm, np.ones((k, k), np.uint8))
+            keep[fm > 0] = 0
+            chin = max(chin, int(pts[152][1]))
+    # ⚠️ 只管下巴以上（头发、背景）。下面是衣服：毛衣条纹、格子衬衫也是「深底上的细亮线」，会被当成划痕抹掉
+    keep[chin:, :] = 0
+    keep = cv2.dilate(keep, np.ones((3, 3), np.uint8))
+    return keep
+
+def _descratch_raw(img, mesh=None):
+    """两遍：先去明显的，再去剩下的淡印子"""
+    total = np.zeros(img.shape[:2], np.uint8)
+    out = img
+    for thr in (14, 9):
+        m = _scratch_mask(out, mesh, thr)
+        if m.sum() == 0: continue
+        out = cv2.inpaint(out, m * 255, 5, cv2.INPAINT_TELEA)
+        total |= m
+    return out, total
+
+def _descratch(img, min_frac=0.025):
+    """只有划痕很密的时候才动（2026-11-08：证件照里老人的白头发会被当成划痕抹掉 —— 等于改了人的样子）。
+    7 张测试照只有一张（头发上满是白道的那张）超过 2.5%，其余都在 1.4% 以下。"""
+    import crop as _cropmod
+    m0 = _cropmod._mp()
+    if not m0:
+        return img, ''
+    out, m = _descratch_raw(img, m0['mesh'])
+    frac = float(m.sum()) / float(m.size)
+    if frac < min_frac:
+        return img, ''
+    return out, 'descratch%.1f' % (frac * 100)
+
+
+# ---------------------------------------------------------------
 # 眼珠修正（2026-11-08）
 #   褪色严重的老照片，眼睛在原图里发白，CodeFormer 会把眼珠修成浅灰绿 / 灰蓝 —— 看着像外国人的眼睛
 #   （李总之前说过上色「会把人的眼睛也变色」，这是同一类问题）。
@@ -455,6 +523,13 @@ def enhance():
             except Exception as te:
                 print('[facecode] 调明暗出错，跳过：', te, flush=True)
 
+        scratch_note = ''
+        if body.get('descratch', True):
+            try:
+                result, scratch_note = _descratch(result)
+            except Exception as se:
+                print('[facecode] 去划痕出错，跳过：', se, flush=True)
+
         iris_note = ''
         if body.get('iris', True):
             try:
@@ -495,6 +570,7 @@ def enhance():
             beauty=beauty_note,
             tone=tone_note,
             iris=iris_note,
+            descratch=scratch_note,
             size=[img.shape[1], img.shape[0]],
             ms=int((time.time() - t0) * 1000))
     except Exception as e:
