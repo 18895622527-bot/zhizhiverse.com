@@ -224,6 +224,64 @@ def _tone(img, k=1.0):
     return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
 
 
+# ---------------------------------------------------------------
+# 眼珠修正（2026-11-08）
+#   褪色严重的老照片，眼睛在原图里发白，CodeFormer 会把眼珠修成浅灰绿 / 灰蓝 —— 看着像外国人的眼睛
+#   （李总之前说过上色「会把人的眼睛也变色」，这是同一类问题）。
+#   只动虹膜那个圆，只修发绿、发蓝的；棕色眼珠不碰。12 张测试照里只改了两张（都是该改的）。
+#   调用方传 iris:0 关掉。
+# ---------------------------------------------------------------
+def _iris_fix(img, max_ratio=0.36):
+    """眼珠太浅（修复模型把褪色老照片的眼睛修成浅灰/灰绿）时，把眼珠压回深色、去掉颜色。
+    只动虹膜那个圆（MediaPipe 468~477 号点），眼白、眼皮、高光都不动。
+    判断标准：虹膜亮度 / 鼻梁皮肤亮度 > max_ratio 才动（中国人的眼珠在照片里一般比皮肤暗得多）。"""
+    h, w = img.shape[:2]
+    import crop as _cropmod   # ⚠️ 不能直接写 crop：下面有个 Flask 路由函数也叫 crop，会把模块名盖掉
+    m0 = _cropmod._mp()
+    if not m0:
+        return img, ''
+    r = m0['mesh'].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))   # crop.py 里那个 face mesh，refine_landmarks=True 才有 468~477 号虹膜点
+    if not r.multi_face_landmarks:
+        return img, ''
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L, A, B = lab[..., 0], lab[..., 1], lab[..., 2]
+    n = 0
+    for fl in r.multi_face_landmarks:
+        P = np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32)
+        nose = P[6]   # 两眼之间的鼻梁
+        sk = L[max(0, int(nose[1]) - 6):int(nose[1]) + 6, max(0, int(nose[0]) - 6):int(nose[0]) + 6]
+        if sk.size == 0: continue
+        skin = float(np.median(sk))
+        for c, ring in ((468, [469, 470, 471, 472]), (473, [474, 475, 476, 477])):
+            cx, cy = P[c]
+            rad = float(np.mean(np.linalg.norm(P[ring] - P[c], axis=1)))
+            if rad < 2: continue
+            m = np.zeros((h, w), np.float32)
+            cv2.circle(m, (int(round(cx)), int(round(cy))), max(1, int(round(rad))), 1.0, -1)
+            # 眼皮会盖住虹膜上下沿：只留比皮肤暗的像素（眼皮、眼白都比虹膜亮），再羽化
+            inside = m > 0
+            if inside.sum() < 6: continue
+            iris_med = float(np.median(L[inside]))
+            ratio = iris_med / max(skin, 1.0)
+            if ratio <= max_ratio: continue
+            # ⚠️ 只修发绿、发蓝的眼珠。棕色眼珠（a 偏红）本来就对，不碰 —— 第一版连彩色照片的棕眼睛一起压黑了
+            ia = float(np.median(A[inside])) - 128; ib = float(np.median(B[inside])) - 128
+            sb = float(np.median(B[max(0, int(nose[1]) - 6):int(nose[1]) + 6, max(0, int(nose[0]) - 6):int(nose[0]) + 6])) - 128
+            if not (ia < -0.8 or (ib < sb - 6 and ia <= 1.0)): continue
+            target = skin * 0.32
+            k = min(1.0, target / max(iris_med, 1.0))
+            keep = (L < skin * 0.92).astype(np.float32)       # 高光、眼白不压
+            mm = cv2.GaussianBlur(m * keep, (0, 0), max(1.0, rad * 0.18))
+            L[:] = L * (1 - mm) + (L * k) * mm
+            A[:] = A * (1 - mm) + (128 + (A - 128) * 0.25) * mm
+            B[:] = B * (1 - mm) + (128 + (B - 128) * 0.25) * mm
+            n += 1
+    if not n:
+        return img, ''
+    out = cv2.cvtColor(np.clip(np.stack([L, A, B], -1), 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    return out, 'iris%d' % n
+
+
 # ⚠️ 摆正/裁剪/去花边/人脸定位全在 crop.py 里。
 #    它只依赖 OpenCV，不需要 GPU，也不需要 PyTorch ——
 #    所以同一个文件可以单独跑在腾讯云 SCF 的轻量 Python 函数上，
@@ -397,6 +455,13 @@ def enhance():
             except Exception as te:
                 print('[facecode] 调明暗出错，跳过：', te, flush=True)
 
+        iris_note = ''
+        if body.get('iris', True):
+            try:
+                result, iris_note = _iris_fix(result)
+            except Exception as ie:
+                print('[facecode] 眼珠修正出错，跳过：', ie, flush=True)
+
         ok, buf = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
         if not ok:
             return jsonify(ok=False, msg='结果图编码失败'), 500
@@ -429,6 +494,7 @@ def enhance():
             fix=did_fix,
             beauty=beauty_note,
             tone=tone_note,
+            iris=iris_note,
             size=[img.shape[1], img.shape[0]],
             ms=int((time.time() - t0) * 1000))
     except Exception as e:
