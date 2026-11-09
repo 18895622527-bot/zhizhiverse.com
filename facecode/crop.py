@@ -859,10 +859,30 @@ def beautify(img):
     img, n = recompose(img)
     if n:
         notes.append(n)
-    img, n = clean_bg(img)
-    if n:
-        notes.append(n)
+    # ⚠️ 2026-11-09 李总传了一张全身照（人站在刻字的石碑前），换背景把石碑和风景全抹成了灰蓝，只剩一团红字。
+    #    换背景只给【半身像】做：脸（眼睛到下巴）占画面高度 12% 以上。测过的 14 张半身像/合影都在 23% 以上，
+    #    全身照、风景照里的人一般 5% 上下。认不出脸也不换。
+    r = portrait_ratio(img)
+    if r >= BG_MIN_FACE:
+        img, n = clean_bg(img)
+        if n:
+            notes.append(n)
+    else:
+        print('[crop] 脸只占画面 %.0f%%，不是半身像，背景不动' % (100 * r), flush=True)
     return img, '+'.join(notes)
+
+
+BG_MIN_FACE = 0.12
+
+
+def portrait_ratio(img):
+    """最大那张脸（眼睛中点到下巴）占画面高度的比例。没脸回 0。"""
+    try:
+        fs = landmarks(img)
+    except Exception:
+        return 0.0
+    h = float(img.shape[0])
+    return max([(f['chin'][1] - (f['eye_l'][1] + f['eye_r'][1]) / 2.0) / h for f in fs] or [0.0])
 
 
 def warp_quad(img, q):
