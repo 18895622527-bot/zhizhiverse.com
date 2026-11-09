@@ -856,6 +856,12 @@ def _upright(img):
 def beautify(img):
     """裁剪之后的第二层：构图 + 换背景。两步各自可失败，失败就跳过。"""
     notes = []
+    # 全身像（脸小、身体长）：不做半身像构图，换背景走「只留这个人 + 边缘贴合」那条
+    if portrait_ratio(img) < BG_MIN_FACE and body_below_face(img) >= FULL_BODY:
+        img, n = clean_bg_person(img)
+        if n:
+            notes.append(n)
+        return img, '+'.join(notes)
     img, n = recompose(img)
     if n:
         notes.append(n)
@@ -873,6 +879,142 @@ def beautify(img):
 
 
 BG_MIN_FACE = 0.12
+FULL_BODY = 4.5   # 下巴往下还有 4.5 个脸长 = 全身像（12 张回归照最多 3.1，石碑前那张全身照 7.6）
+
+
+def _blaze_face(rgb):
+    """BlazeFace 最大的那张脸，回 (x, y, w, h)（rgb 的像素坐标）或 None。"""
+    m = _mp()
+    if not m or 'det' not in m:
+        return None
+    r = m['det'].process(rgb)
+    if not r.detections:
+        return None
+    sh, sw = rgb.shape[:2]
+    bs = [(d.location_data.relative_bounding_box.xmin * sw, d.location_data.relative_bounding_box.ymin * sh,
+           d.location_data.relative_bounding_box.width * sw, d.location_data.relative_bounding_box.height * sh)
+          for d in r.detections]
+    return max(bs, key=lambda b: b[2] * b[3])
+
+
+def _small_rgb(img, side=640):
+    h, w = img.shape[:2]
+    sc = min(1.0, float(side) / max(h, w))
+    sm = cv2.resize(img, (max(1, int(w * sc)), max(1, int(h * sc))), interpolation=cv2.INTER_AREA) if sc < 1 else img
+    return cv2.cvtColor(sm, cv2.COLOR_BGR2RGB), sc
+
+
+def _person_of_face(img):
+    """连着最大那张脸的那个人。回 (人像分割的软蒙版 0~1【原图尺寸】, 只含这个人的 0/1 蒙版, 脸框【原图坐标】) 或 None。
+    先开运算把「被照片边切掉半个的路人」那种细连接断开，再只留连着脸的那一块。"""
+    m = _mp()
+    if not m:
+        return None
+    rgb, sc = _small_rgb(img)
+    fb = _blaze_face(rgb)
+    if fb is None:
+        return None
+    x, y, bw, bh = fb
+    soft = m['seg'].process(rgb).segmentation_mask
+    hard = (soft > 0.5).astype(np.uint8)
+    k = max(3, int(bh / 5) | 1)
+    opened = cv2.morphologyEx(hard, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    cx, cy = int(min(rgb.shape[1] - 1, max(0, x + bw / 2))), int(min(rgb.shape[0] - 1, max(0, y + bh / 2)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(opened, 8)
+    i = lab[cy, cx]
+    if i == 0:
+        return None
+    one = (lab == i).astype(np.uint8)
+    one = cv2.dilate(one, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) & hard   # 开运算削掉的边补回来，但只补这个人身上的
+    H, W = img.shape[:2]
+    soft = cv2.resize(soft, (W, H), interpolation=cv2.INTER_LINEAR)
+    one = cv2.resize(one, (W, H), interpolation=cv2.INTER_NEAREST)
+    return soft, one, (x / sc, y / sc, bw / sc, bh / sc)
+
+
+def body_below_face(img):
+    """最大那张脸（BlazeFace）下沿往下，连着这张脸的人（人像分割）还有几个脸高。认不出回 0。"""
+    m = _mp()
+    if not m or 'det' not in m:
+        return 0.0
+    try:
+        rgb, sc = _small_rgb(img)
+        fb = _blaze_face(rgb)
+        if fb is None:
+            return 0.0
+        x, y, bw, bh = fb
+        seg = (m['seg'].process(rgb).segmentation_mask > 0.5).astype(np.uint8)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(seg, 8)
+        cx, cy = int(min(rgb.shape[1] - 1, max(0, x + bw / 2))), int(min(rgb.shape[0] - 1, max(0, y + bh / 2)))
+        i = lab[cy, cx]
+        if i == 0:
+            return 0.0
+        return float(st[i][1] + st[i][3] - (y + bh)) / max(1.0, bh)
+    except Exception as e:
+        print('[crop] 量身体出错，当不知道：%s' % str(e)[:120], flush=True)
+        return 0.0
+
+
+def crop_person(img, margin=0.06):
+    """全身像按【整个人】裁：这个人的外接框，四周留 6%。回 (图, 说明)；裁不出来回 (原图, '')。"""
+    try:
+        p = _person_of_face(img)
+    except Exception as e:
+        print('[crop] 按人裁出错：%s' % str(e)[:120], flush=True)
+        return img, ''
+    if p is None:
+        return img, ''
+    one = p[1]
+    ys, xs = np.nonzero(one)
+    if len(xs) == 0:
+        return img, ''
+    H, W = img.shape[:2]
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    mg = int(margin * max(x1 - x0, y1 - y0))
+    x0, y0, x1, y1 = max(0, x0 - mg), max(0, y0 - mg), min(W, x1 + mg + 1), min(H, y1 + mg + 1)
+    if (x1 - x0) * (y1 - y0) > 0.9 * W * H:
+        return img, ''   # 人本来就占满了，裁了也没意义
+    return img[y0:y1, x0:x1], 'person'
+
+
+def _guided(I, p, r, eps=1e-3):
+    """导向滤波（He 2010）：让蒙版的边贴着原图的颜色边走。I、p 都是 0~1 float32 单通道。"""
+    k = (2 * r + 1, 2 * r + 1)
+    mI = cv2.boxFilter(I, -1, k); mp = cv2.boxFilter(p, -1, k)
+    cIp = cv2.boxFilter(I * p, -1, k) - mI * mp
+    vI = cv2.boxFilter(I * I, -1, k) - mI * mI
+    a = cIp / (vI + eps); b = mp - a * mI
+    return cv2.boxFilter(a, -1, k) * I + cv2.boxFilter(b, -1, k)
+
+
+def clean_bg_person(img, color=(188, 176, 160)):
+    """全身像换背景：只留连着脸的那个人（路人、碎块不要），蒙版边用导向滤波贴到原图的边上，脸框里整块保留。"""
+    try:
+        p = _person_of_face(img)
+    except Exception as e:
+        print('[crop] 全身像换背景出错：%s' % str(e)[:120], flush=True)
+        return img, ''
+    if p is None:
+        return img, ''
+    soft, one, (fx, fy, fw, fh) = p
+    h, w = img.shape[:2]
+    k = max(3, int(fh / 4) | 1)
+    gate = cv2.dilate(one, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).astype(np.float32)
+    mask = np.clip((soft - 0.25) / 0.5, 0, 1).astype(np.float32) * gate
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    mask = np.clip(_guided(gray, mask, max(2, int(fh / 12))), 0, 1)
+    face = np.zeros((h, w), np.float32)
+    cv2.ellipse(face, (int(fx + fw / 2), int(fy + fh * 0.45)), (int(fw * 0.55), int(fh * 0.75)), 0, 0, 360, 1.0, -1)
+    mask = np.maximum(mask, cv2.GaussianBlur(face, (0, 0), max(1.0, fw / 20)))
+    if float(mask.mean()) < 0.05:
+        return img, ''
+    mask = mask[..., None]
+    g = np.linspace(0, 1, h)[:, None, None]
+    top = np.array(color, np.float32) * 1.08
+    bot = np.array(color, np.float32) * 0.88
+    bg = np.repeat(top * (1 - g) + bot * g, w, axis=1)
+    out = (img.astype(np.float32) * mask + bg * (1 - mask)).astype(np.uint8)
+    return out, 'bgp'
 
 
 def portrait_ratio(img):

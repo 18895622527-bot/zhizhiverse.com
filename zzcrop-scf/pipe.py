@@ -220,6 +220,11 @@ def locate(img, fs, allow_paper=True, strict_keep=True):
             sub = img[box[1]:box[3], box[0]:box[2]]
             if n == 0 or _keeps_faces(sub, n):
                 return sub, 'paper'
+    if n and body_below_face(img) >= FULL_BODY:
+        out, why = crop.crop_person(img)
+        if why:
+            return out, 'person'
+        return img, ''
     if n:
         allf = _merge_faces(img, fs)
         if len(allf) > n:
@@ -235,37 +240,8 @@ def locate(img, fs, allow_paper=True, strict_keep=True):
     return img, ''
 
 
-FULL_BODY = 4.5
-
-
-def body_below_face(img):
-    """最大那张脸（BlazeFace）下沿往下，连着这张脸的人（人像分割）还有几个脸高。认不出回 0。"""
-    m = crop._mp()
-    if not m or 'det' not in m:
-        return 0.0
-    try:
-        h, w = img.shape[:2]
-        sc = 640.0 / max(h, w)
-        sm = cv2.resize(img, (max(1, int(w * sc)), max(1, int(h * sc))), interpolation=cv2.INTER_AREA) if sc < 1 else img
-        rgb = cv2.cvtColor(sm, cv2.COLOR_BGR2RGB)
-        r = m['det'].process(rgb)
-        if not r.detections:
-            return 0.0
-        sh, sw = sm.shape[:2]
-        bs = [(d.location_data.relative_bounding_box.xmin * sw, d.location_data.relative_bounding_box.ymin * sh,
-               d.location_data.relative_bounding_box.width * sw, d.location_data.relative_bounding_box.height * sh)
-              for d in r.detections]
-        x, y, bw, bh = max(bs, key=lambda b: b[2] * b[3])
-        seg = (m['seg'].process(rgb).segmentation_mask > 0.5).astype(np.uint8)
-        n, lab, st, _ = cv2.connectedComponentsWithStats(seg, 8)
-        cx, cy = int(min(sw - 1, max(0, x + bw / 2))), int(min(sh - 1, max(0, y + bh / 2)))
-        i = lab[cy, cx]
-        if i == 0:
-            return 0.0
-        return float(st[i][1] + st[i][3] - (y + bh)) / max(1.0, bh)
-    except Exception as e:
-        print('[pipe] 量身体出错，当不知道：%s' % str(e)[:120], flush=True)
-        return 0.0
+FULL_BODY = crop.FULL_BODY
+body_below_face = crop.body_below_face
 
 
 def run(img, quad=None, do_border=True):
@@ -285,8 +261,10 @@ def run(img, quad=None, do_border=True):
     if o.startswith('sweep') and quad is None:
         b = body_below_face(src)
         if b >= FULL_BODY:
-            print('[pipe] 身体有 %.1f 个脸长，是整张照片里的全身像，不裁不转' % b, flush=True)
-            return img, ''
+            # 全身像：不按脸挖、不按头转，按【整个人】裁（头到脚留一圈），后面 beautify 走全身像的换背景
+            out, why = crop.crop_person(src)
+            print('[pipe] 身体有 %.1f 个脸长，是整张照片里的全身像，按人裁：%s' % (b, why or '没裁'), flush=True)
+            return (out, 'person') if why else (img, '')
     if o:
         note.append(o)
     # ⚠️ 转过角度的图四周是补出来的边（拉丝），找纸会在拉丝上拟出假四边形（2026-11-03 线上那张）。
