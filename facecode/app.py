@@ -363,6 +363,95 @@ def _preclean(img, min_frac=0.05, min_line=0.25):
 
 
 # ---------------------------------------------------------------
+# 衣服和背景收拾干净（2026-11-09 李总：「整张照片还显得脏的地方，把衣服和背景搞干净一点」）
+#   ① 背景：人以外（连着脸的那个人），用二次曲面拟合出干净的渐变整块换掉 —— 撕口、霉斑、灰团一起没了
+#   ② 衣服：下巴以下、比周围亮一截的白点补掉   ③ 衣服上大块发白的霉斑压回周围的暗度
+#   ⚠️ 脸、脖子（跟脸一样亮、连着下巴的那片 + 下颌往下 0.45 脸宽）不动。只在修脸前找到严重裂纹（precrack）时做。调用方传 tidy:0 关掉。
+# ---------------------------------------------------------------
+def _tidy(img, mesh, seg):
+    """破损严重的照片修完之后：① 背景整块重画成干净的渐变 ② 衣服上的浅色霉斑、白点补掉。"""
+    h, w = img.shape[:2]
+    out = img.copy()
+    r = mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    if not r.multi_face_landmarks: return img, ''
+    face = np.zeros((h, w), np.uint8); chin = 0; fw = 0; necks = []
+    for fl in r.multi_face_landmarks:
+        P = np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32)
+        cv2.fillPoly(face, [P[_SC_OVAL].astype(np.int32)], 1)
+        chin = max(chin, int(P[152][1])); fw = max(fw, float(P[_SC_OVAL][:, 0].max() - P[_SC_OVAL][:, 0].min()))
+        # 脖子：下颌那一圈往下延伸 0.45 个脸宽
+        jaw = P[[136, 150, 149, 176, 148, 152, 377, 400, 378, 379, 365]]
+        d = 0.45 * float(P[_SC_OVAL][:, 0].max() - P[_SC_OVAL][:, 0].min())
+        necks.append(np.vstack([jaw, (jaw + [0, d])[::-1]]).astype(np.int32))
+    pm = seg.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).segmentation_mask
+    pm = cv2.GaussianBlur(pm, (0, 0), 3)
+    # ---- ① 背景：人以外的地方，用二次曲面拟合干净背景的亮度和颜色，整块替换 ----
+    person = (pm > 0.5).astype(np.uint8)
+    # 人要连着脸：撕口那团跟人不连通的碎块，不算人
+    n, lab, st, _ = cv2.connectedComponentsWithStats(person, 8)
+    keep = np.zeros_like(person)
+    for i in range(1, n):
+        if (face[lab == i] > 0).any(): keep[lab == i] = 1
+    keep = cv2.morphologyEx(keep, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(fw / 25) | 1,) * 2))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(keep, 8)
+    keep2 = np.zeros_like(keep)
+    for i in range(1, n):
+        if (face[lab == i] > 0).any(): keep2[lab == i] = 1
+    bgm = (keep2 == 0)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    sample = bgm & (cv2.erode(bgm.astype(np.uint8), np.ones((15, 15), np.uint8)) > 0)
+    A = np.stack([np.ones_like(xx), xx / w, yy / h, (xx / w) ** 2, (yy / h) ** 2, xx * yy / (w * h)], -1)
+    bg = np.zeros_like(out, np.float32)
+    for c in range(3):
+        v = out[..., c].astype(np.float32)
+        # 用中位数抗住残留的脏点：先粗拟，去掉偏差大的，再拟一次
+        As, vs = A[sample][::7], v[sample][::7]
+        coef = np.linalg.lstsq(As, vs, rcond=None)[0]
+        res = np.abs(As @ coef - vs); ok = res < np.percentile(res, 80)
+        coef = np.linalg.lstsq(As[ok], vs[ok], rcond=None)[0]
+        bg[..., c] = A @ coef
+    alpha = cv2.GaussianBlur(keep2.astype(np.float32), (0, 0), max(2, fw / 120))[..., None]
+    out = (out.astype(np.float32) * alpha + bg * (1 - alpha)).astype(np.uint8)
+    # ---- ② 衣服：下巴以下、人身上，比周围亮一截的斑块和白点 ----
+    cloth = (keep2 > 0) & (face == 0)
+    cloth[:chin, :] = False
+    # 脖子是皮肤，不是衣服：跟脸差不多亮、又跟下巴连着的那一片，不动
+    L0 = cv2.GaussianBlur(cv2.cvtColor(out, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32), (0, 0), max(3.0, fw / 40))
+    fmed = float(np.median(L0[face > 0]))
+    bright = ((L0 > fmed - 35) & (keep2 > 0)).astype(np.uint8)
+    seed = cv2.dilate(face, np.ones((int(fw / 15) | 1,) * 2, np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(bright, 8)
+    skin = np.zeros_like(bright)
+    for i in range(1, n):
+        if (seed[lab == i] > 0).any(): skin[lab == i] = 1
+    neck = np.zeros((h, w), np.uint8)
+    for q in necks: cv2.fillPoly(neck, [q], 1)
+    skin |= (neck > 0) & (L0 > fmed - 70)
+    skin = cv2.dilate(skin, np.ones((int(fw / 20) | 1,) * 2, np.uint8))
+    cloth &= (skin == 0)
+    L = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)[..., 0]
+    k = max(15, int(fw / 6) | 1)
+    med = cv2.medianBlur(L, min(k, 99) | 1)
+    spot = ((L.astype(np.int16) - med.astype(np.int16)) > 12) & cloth
+    spot = cv2.morphologyEx(spot.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    spot = cv2.dilate(spot, np.ones((5, 5), np.uint8))
+    if spot.sum():
+        out = cv2.inpaint(out, spot * 255, 6, cv2.INPAINT_TELEA)
+    # ③ 衣服上大块的发白霉斑：低频亮度比「周围偏暗的那层」高出来的部分压下去；衣服本身的明暗、纹理留着
+    lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L = lab[..., 0]
+    sig = max(4.0, fw / 22)
+    low = cv2.GaussianBlur(L, (0, 0), sig)
+    win = int(fw / 3) | 1
+    base = cv2.GaussianBlur(cv2.erode(low, np.ones((win, win), np.uint8)), (0, 0), fw / 6)
+    excess = np.clip(low - base - 6, 0, None)
+    cm = cv2.GaussianBlur(cloth.astype(np.float32), (0, 0), fw / 30)
+    lab[..., 0] = np.clip(L - excess * 0.8 * cm, 0, 255)
+    out = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    return out, 'tidy(bg+cloth%.1f%%)' % (100 * spot.mean())
+
+
+# ---------------------------------------------------------------
 # 去划痕（2026-11-08 李总：「照片上的划痕感能去掉吗？特别头发那一块」）
 #   CodeFormer 只重画脸，头发、背景上的白色划痕原样留着。这里找细长的亮线（形态学 top-hat），用周围补上（inpaint）。
 #   ⚠️ 只管下巴以上、脸的轮廓以外（脸已经修干净了；衣服的条纹、格子会被误认）。只有划痕很密才动。调用方传 descratch:0 关掉。
@@ -763,6 +852,16 @@ def enhance():
             except Exception as fe2:
                 print('[facecode] 折痕明暗拉平出错，跳过：', fe2, flush=True)
 
+        tidy_note = ''
+        if pre_note and body.get('tidy', True):
+            try:
+                import crop as _cropmod
+                _m2 = _cropmod._mp()
+                if _m2:
+                    result, tidy_note = _tidy(result, _m2['mesh'], _m2['seg'])
+            except Exception as te2:
+                print('[facecode] 衣服背景清理出错，跳过：', te2, flush=True)
+
         iris_note = ''
         if body.get('iris', True):
             try:
@@ -805,6 +904,7 @@ def enhance():
             iris=iris_note,
             descratch=scratch_note,
             precrack=pre_note,
+            tidy=tidy_note,
             size=[img.shape[1], img.shape[0]],
             ms=int((time.time() - t0) * 1000))
     except Exception as e:
