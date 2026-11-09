@@ -221,10 +221,7 @@ def locate(img, fs, allow_paper=True, strict_keep=True):
             if n == 0 or _keeps_faces(sub, n):
                 return sub, 'paper'
     if n and body_below_face(img) >= FULL_BODY:
-        out, why = crop.crop_person(img)
-        if why:
-            return out, 'person'
-        return img, ''
+        return img, ''   # 全身像：不按脸裁
     if n:
         allf = _merge_faces(img, fs)
         if len(allf) > n:
@@ -244,12 +241,39 @@ FULL_BODY = crop.FULL_BODY
 body_below_face = crop.body_below_face
 
 
+def _face_tilt(img):
+    """最大那张脸歪了几度（绝对值）。认不出回 None。"""
+    try:
+        fs = crop.landmarks(img)
+    except Exception:
+        return None
+    if not fs:
+        return None
+    f = max(fs, key=lambda x: np.linalg.norm(x['eye_r'] - x['eye_l']))
+    return abs(float(f['tilt']))
+
+
+def _warp_tilts_face(img, warped, extra=8.0):
+    """千问指的角拉正以后，脸比原图多歪了 extra 度以上 → True（指错了）。两边有一边认不出脸就不判。"""
+    t0 = _face_tilt(img)
+    t1 = _face_tilt(warped)
+    if t0 is None or t1 is None:
+        return False
+    return t1 - t0 > extra
+
+
 def run(img, quad=None, do_border=True):
     """整条链。quad 是千问指的四个角（可能只是包围盒），没有就在整张图上找。"""
     note = []
     src = img
     if quad is not None:
         w, why = crop.warp_quad(img, quad)
+        if w is not None and _warp_tilts_face(img, w):
+            # ⚠️ 2026-11-09 撕掉一角的那张：千问把撕掉的角猜到了右边中间，照片被拉歪 21.8°（原图里头只歪 0.8°），
+            #    裁出来头是斜的、裂纹也跟着变了形，后面修脸前去裂纹没触发，裂纹留在脸上。
+            #    千问指的角拉完之后，脸反而比原图多歪 8° 以上 = 指错了，不用，退回规则。
+            print('[pipe] 千问指的角把脸拉歪了，不用，退回规则', flush=True)
+            w = None
         if w is not None:
             src = w
             note.append('vl')
@@ -261,10 +285,9 @@ def run(img, quad=None, do_border=True):
     if o.startswith('sweep') and quad is None:
         b = body_below_face(src)
         if b >= FULL_BODY:
-            # 全身像：不按脸挖、不按头转，按【整个人】裁（头到脚留一圈），后面 beautify 走全身像的换背景
-            out, why = crop.crop_person(src)
-            print('[pipe] 身体有 %.1f 个脸长，是整张照片里的全身像，按人裁：%s' % (b, why or '没裁'), flush=True)
-            return (out, 'person') if why else (img, '')
+            # 全身像：背景是这张照片的回忆（石碑、风景），一个像素都不动（李总 2026-11-09：抠这张图没意义）
+            print('[pipe] 身体有 %.1f 个脸长，是整张照片里的全身像，不裁不转' % b, flush=True)
+            return img, ''
     if o:
         note.append(o)
     # ⚠️ 转过角度的图四周是补出来的边（拉丝），找纸会在拉丝上拟出假四边形（2026-11-03 线上那张）。

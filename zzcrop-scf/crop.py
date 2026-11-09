@@ -851,12 +851,7 @@ def _upright(img):
 def beautify(img):
     """裁剪之后的第二层：构图 + 换背景。两步各自可失败，失败就跳过。"""
     notes = []
-    # 全身像（脸小、身体长）：不做半身像构图，换背景走「只留这个人 + 边缘贴合」那条
-    if portrait_ratio(img) < BG_MIN_FACE and body_below_face(img) >= FULL_BODY:
-        img, n = clean_bg_person(img)
-        if n:
-            notes.append(n)
-        return img, '+'.join(notes)
+    # 全身像不换背景（clean_bg_person 留着，以后做换装时可能用上；现在不调用）
     img, n = recompose(img)
     if n:
         notes.append(n)
