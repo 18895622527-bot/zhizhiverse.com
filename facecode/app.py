@@ -225,6 +225,72 @@ def _tone(img, k=1.0):
 
 
 # ---------------------------------------------------------------
+# 修脸之前先去折痕、裂纹（2026-11-09 李总拿一张撕坏的照片试：折痕斜穿过脸，修完还在）
+#   CodeFormer 为了像本人，会照着输入把裂纹也「修」进脸里。所以破损严重的照片先整张清一遍亮线和霉点，再交给它。
+#   五官（眼、眉、嘴）挖掉不碰。只在破损严重时触发。调用方传 precrack:0 关掉。
+# ---------------------------------------------------------------
+_PC_EYE_L = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+_PC_EYE_R = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466]
+_PC_BROW_L = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46]
+_PC_BROW_R = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276]
+_PC_LIPS = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
+
+def _crack_mask(img, mesh, thr=12):
+    """修脸之前：整张照片上细长的亮线（折痕、裂纹）和亮的小霉点。五官（眼、眉、嘴）挖掉不碰。
+    返回 (mask, 占比)"""
+    h, w = img.shape[:2]
+    L = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)[..., 0]
+    k = max(5, int(round(min(h, w) / 90)) | 1)
+    th = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    raw = (th > thr).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(raw, 8)
+    keep = np.zeros_like(raw)
+    for i in range(1, n):
+        x, y, bw, bh, area = st[i]
+        span = max(bw, bh)
+        if area < 3: continue
+        fill = area / float(bw * bh)
+        if (span >= k * 2.0 and fill < 0.4) or area <= k * k * 0.6:
+            keep[lab == i] = 1
+    r = mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    for fl in (r.multi_face_landmarks or []):
+        P = np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32)
+        fw = float(P[:, 0].max() - P[:, 0].min())
+        ex = np.zeros((h, w), np.uint8)
+        for poly in (_PC_EYE_L, _PC_EYE_R, _PC_BROW_L, _PC_BROW_R, _PC_LIPS):
+            cv2.fillPoly(ex, [cv2.convexHull(P[poly].astype(np.int32))], 1)
+        ex = cv2.dilate(ex, np.ones((max(3, int(fw * 0.04)),) * 2, np.uint8))
+        keep[ex > 0] = 0
+    keep = cv2.dilate(keep, np.ones((3, 3), np.uint8))
+    return keep, float(keep.mean())
+
+def _preclean_raw(img, mesh):
+    out = img; tot = np.zeros(img.shape[:2], np.uint8)
+    for thr in (14, 9):
+        m, f = _crack_mask(out, mesh, thr)
+        if m.sum():
+            out = cv2.inpaint(out, m * 255, 4, cv2.INPAINT_TELEA); tot |= m
+    return out, tot
+
+def _preclean(img, min_frac=0.05, min_line=0.25):
+    """只给破损严重的照片用（折痕穿过脸、满身裂纹）。
+    判断：亮线占比 > 5%，或者最长的一条线 > 照片长边的 1/4。2026-11-09 测 14 张：撕坏的那张 18.2% / 0.44，其余都 ≤ 1.1% / 0.08。"""
+    import crop as _cropmod
+    m0 = _cropmod._mp()
+    if not m0:
+        return img, ''
+    mesh = m0['mesh']
+    m, frac = _crack_mask(img, mesh, 14)
+    h, w = img.shape[:2]
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
+    longest = max([max(st[i][2], st[i][3]) for i in range(1, n)] or [0]) / float(max(h, w))
+    if frac < min_frac and longest < min_line:
+        return img, ''
+    out, tot = _preclean_raw(img, mesh)
+    return out, 'precrack%.0f' % (100 * float(tot.mean()))
+
+
+# ---------------------------------------------------------------
 # 去划痕（2026-11-08 李总：「照片上的划痕感能去掉吗？特别头发那一块」）
 #   CodeFormer 只重画脸，头发、背景上的白色划痕原样留着。这里找细长的亮线（形态学 top-hat），用周围补上（inpaint）。
 #   ⚠️ 只管下巴以上、脸的轮廓以外（脸已经修干净了；衣服的条纹、格子会被误认）。只有划痕很密才动。调用方传 descratch:0 关掉。
@@ -541,6 +607,13 @@ def enhance():
 
         img = _shrink(img)
 
+        pre_note = ''
+        if body.get('precrack', True):
+            try:
+                img, pre_note = _preclean(img)
+            except Exception as pe:
+                print('[facecode] 修脸前去裂纹出错，跳过：', pe, flush=True)
+
         _load()
         _helper.clean_all()
         _helper.read_image(img)
@@ -648,6 +721,7 @@ def enhance():
             tone=tone_note,
             iris=iris_note,
             descratch=scratch_note,
+            precrack=pre_note,
             size=[img.shape[1], img.shape[0]],
             ms=int((time.time() - t0) * 1000))
     except Exception as e:
