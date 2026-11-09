@@ -235,6 +235,39 @@ def locate(img, fs, allow_paper=True, strict_keep=True):
     return img, ''
 
 
+FULL_BODY = 4.5
+
+
+def body_below_face(img):
+    """最大那张脸（BlazeFace）下沿往下，连着这张脸的人（人像分割）还有几个脸高。认不出回 0。"""
+    m = crop._mp()
+    if not m or 'det' not in m:
+        return 0.0
+    try:
+        h, w = img.shape[:2]
+        sc = 640.0 / max(h, w)
+        sm = cv2.resize(img, (max(1, int(w * sc)), max(1, int(h * sc))), interpolation=cv2.INTER_AREA) if sc < 1 else img
+        rgb = cv2.cvtColor(sm, cv2.COLOR_BGR2RGB)
+        r = m['det'].process(rgb)
+        if not r.detections:
+            return 0.0
+        sh, sw = sm.shape[:2]
+        bs = [(d.location_data.relative_bounding_box.xmin * sw, d.location_data.relative_bounding_box.ymin * sh,
+               d.location_data.relative_bounding_box.width * sw, d.location_data.relative_bounding_box.height * sh)
+              for d in r.detections]
+        x, y, bw, bh = max(bs, key=lambda b: b[2] * b[3])
+        seg = (m['seg'].process(rgb).segmentation_mask > 0.5).astype(np.uint8)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(seg, 8)
+        cx, cy = int(min(sw - 1, max(0, x + bw / 2))), int(min(sh - 1, max(0, y + bh / 2)))
+        i = lab[cy, cx]
+        if i == 0:
+            return 0.0
+        return float(st[i][1] + st[i][3] - (y + bh)) / max(1.0, bh)
+    except Exception as e:
+        print('[pipe] 量身体出错，当不知道：%s' % str(e)[:120], flush=True)
+        return 0.0
+
+
 def run(img, quad=None, do_border=True):
     """整条链。quad 是千问指的四个角（可能只是包围盒），没有就在整张图上找。"""
     note = []
@@ -245,6 +278,15 @@ def run(img, quad=None, do_border=True):
             src = w
             note.append('vl')
     up, o, fs = orient(src)
+    # ⚠️ 2026-11-09 李总传了一张全身照（老人站在石碑前，脸很小）：脸小到 face mesh 认不出，走了 sweep 那条路 ——
+    #    那条路是给「桌上一小张照片」用的：按脸挖一块、按头的角度转。全身照被挖成半截，后面又换了背景。
+    #    身体从下巴往下还有 4.5 个脸那么长 = 这就是一整张照片里的人，不是桌上的小照片，一个像素都不动。
+    #    （12 张回归照最多 3.1，走 sweep 的几张都 ≤ 2.2；那张全身照 7.6）
+    if o.startswith('sweep') and quad is None:
+        b = body_below_face(src)
+        if b >= FULL_BODY:
+            print('[pipe] 身体有 %.1f 个脸长，是整张照片里的全身像，不裁不转' % b, flush=True)
+            return img, ''
     if o:
         note.append(o)
     # ⚠️ 转过角度的图四周是补出来的边（拉丝），找纸会在拉丝上拟出假四边形（2026-11-03 线上那张）。
