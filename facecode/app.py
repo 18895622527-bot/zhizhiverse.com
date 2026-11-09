@@ -193,7 +193,18 @@ def _beauty(img, face_boxes, strength=0.6):
 #   只动明暗和偏色，不动形状，不上色。彩色照片的颜色一点不动（只有黑白照才去偏色）。
 #   调用方传 tone:0 关掉。
 # ---------------------------------------------------------------
-def _tone(img, k=1.0):
+def _looks_bw(img, line=3.0):
+    """黑白照（含泛黄、泛蓝的黑白照）还是彩色照：画面中间那块 a 通道（红绿）的起伏。
+    ⚠️ 2026-11-09 用【修之前】的照片判断，线从 3.5 降到 3.0：石碑前那张褪色的彩色照是 3.4，被当成黑白照把暖色洗掉了，
+       脸修出来发白、像外国人。手上的黑白照 1.3~1.9，彩色照 4.9 以上。
+       判错的代价不一样：彩色当黑白 = 颜色被洗掉；黑白当彩色 = 留一点泛黄。所以往彩色那边偏。"""
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    h, w = img.shape[:2]
+    ca = lab[int(h * .2):int(h * .8), int(w * .2):int(w * .8), 1]
+    return float(ca.std()) < line
+
+
+def _tone(img, k=1.0, bw=None):
     """修完之后调一次明暗：拉开黑白场（高光留余量）+ 中间调提亮 + 局部对比 + 去偏色。不动形状，不加颜色。"""
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
     L, A, B = lab[..., 0], lab[..., 1], lab[..., 2]
@@ -216,7 +227,7 @@ def _tone(img, k=1.0):
     # 彩色照片的颜色一点不动（2026-11-07 试过整体拉中性，证件照老人的肤色被洗成了灰）。
     h, w = L.shape
     ca = A[int(h * .2):int(h * .8), int(w * .2):int(w * .8)]
-    if float(ca.std()) < 3.5:
+    if (float(ca.std()) < 3.5) if bw is None else bw:
         A = 128 + (A - 128) * (1 - 0.5 * k); B = 128 + (B - 128) * (1 - 0.5 * k)
         A = A - (A.mean() - 128) * 0.6 * k
         B = B - (B.mean() - 128) * 0.6 * k
@@ -594,6 +605,69 @@ def _face_clean_raw(img, mesh, smooth=0.0):
 #   只动虹膜那个圆，只修发绿、发蓝的；棕色眼珠不碰。12 张测试照里只改了两张（都是该改的）。
 #   调用方传 iris:0 关掉。
 # ---------------------------------------------------------------
+def _mesh_all(img, m0):
+    """每张脸的 478 个点（原图坐标）。
+    ⚠️ 2026-11-09 石碑前那张全身照：脸只占画面一小块，face mesh 在整张图上认不出 → 眼珠修正整个跳过，蓝眼睛留在了脸上。
+       整张图上认不出的脸，用 BlazeFace（小脸也认得）找到位置，把那一块放大到 512 再认。"""
+    h, w = img.shape[:2]
+    out = []
+    r = m0['mesh'].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    for fl in (r.multi_face_landmarks or []):
+        out.append(np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32))
+    if 'det' not in m0:
+        return out
+    d = m0['det'].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    for det in (d.detections or []):
+        b = det.location_data.relative_bounding_box
+        bx, by, bw, bh = b.xmin * w, b.ymin * h, b.width * w, b.height * h
+        cx, cy = bx + bw / 2, by + bh / 2
+        if any(P[:, 0].min() <= cx <= P[:, 0].max() and P[:, 1].min() <= cy <= P[:, 1].max() for P in out):
+            continue   # 这张脸整张图上已经认出来了
+        x0, y0 = int(max(0, bx - bw)), int(max(0, by - bh))
+        x1, y1 = int(min(w, bx + 2 * bw)), int(min(h, by + 2 * bh))
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            continue
+        roi = img[y0:y1, x0:x1]
+        sc = 512.0 / max(roi.shape[:2])
+        big = cv2.resize(roi, None, fx=sc, fy=sc, interpolation=cv2.INTER_CUBIC)
+        rr = m0['mesh'].process(cv2.cvtColor(big, cv2.COLOR_BGR2RGB))
+        for fl in (rr.multi_face_landmarks or [])[:1]:
+            bh2, bw2 = big.shape[:2]
+            out.append(np.array([(q.x * bw2 / sc + x0, q.y * bh2 / sc + y0) for q in fl.landmark], np.float32))
+    return out
+
+
+def _iris_from_orig(result, orig, m0):
+    """彩色照片：眼珠的颜色用【原照片】那个位置的颜色，修脸模型只管把眼睛画清楚，不许它编颜色。
+    ⚠️ 2026-11-09 石碑前那张全身照：脸太糊，CodeFormer 把眼珠画成了蓝色。原照片那里没有蓝色，修完也不该有。
+       本来就是棕色眼睛的，颜色照旧是棕色。只动颜色（LAB 的 a、b），明暗和细节不动。黑白照片不走这一步。"""
+    h, w = result.shape[:2]
+    pts = _mesh_all(result, m0)
+    if not pts:
+        return result, ''
+    o = cv2.resize(orig, (w, h), interpolation=cv2.INTER_CUBIC)
+    lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lo = cv2.cvtColor(o, cv2.COLOR_BGR2LAB).astype(np.float32)
+    mask = np.zeros((h, w), np.float32)
+    n = 0
+    for P in pts:
+        for c, ring in ((468, [469, 470, 471, 472]), (473, [474, 475, 476, 477])):
+            rad = float(np.mean(np.linalg.norm(P[ring] - P[c], axis=1)))
+            if rad < 2:
+                continue
+            cv2.circle(mask, (int(round(P[c][0])), int(round(P[c][1]))), int(round(rad * 1.15)), 1.0, -1)
+            n += 1
+    if not n:
+        return result, ''
+    rad_mean = max(2.0, float(np.sqrt(mask.sum() / (n * np.pi))))
+    mask = cv2.GaussianBlur(mask, (0, 0), max(1.0, rad_mean * 0.25))[..., None]
+    # 原照片的颜色先抹匀一点（原照片本来就糊，抹匀只是去噪）
+    ab = cv2.GaussianBlur(lo[..., 1:], (0, 0), max(1.0, rad_mean * 0.3))
+    lab[..., 1:] = lab[..., 1:] * (1 - mask) + ab * mask
+    out = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    return out, 'irisc%d' % n
+
+
 def _iris_fix(img, max_ratio=0.36):
     """眼珠太浅（修复模型把褪色老照片的眼睛修成浅灰/灰绿）时，把眼珠压回深色、去掉颜色。
     只动虹膜那个圆（MediaPipe 468~477 号点），眼白、眼皮、高光都不动。
@@ -603,14 +677,13 @@ def _iris_fix(img, max_ratio=0.36):
     m0 = _cropmod._mp()
     if not m0:
         return img, ''
-    r = m0['mesh'].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))   # crop.py 里那个 face mesh，refine_landmarks=True 才有 468~477 号虹膜点
-    if not r.multi_face_landmarks:
+    pts = _mesh_all(img, m0)
+    if not pts:
         return img, ''
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
     L, A, B = lab[..., 0], lab[..., 1], lab[..., 2]
     n = 0
-    for fl in r.multi_face_landmarks:
-        P = np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32)
+    for P in pts:
         nose = P[6]   # 两眼之间的鼻梁
         sk = L[max(0, int(nose[1]) - 6):int(nose[1]) + 6, max(0, int(nose[0]) - 6):int(nose[0]) + 6]
         if sk.size == 0: continue
@@ -776,6 +849,9 @@ def enhance():
             except Exception as pe:
                 print('[facecode] 修脸前去裂纹出错，跳过：', pe, flush=True)
 
+        # 黑白还是彩色，看【修之前】的照片（修完的脸颜色会变，判断就不稳）
+        bw_in = _looks_bw(img)
+
         _load()
         _helper.clean_all()
         _helper.read_image(img)
@@ -800,6 +876,17 @@ def enhance():
         _helper.get_inverse_affine(None)
         result = _helper.paste_faces_to_input_image(upsample_img=None)
 
+        # 彩色照片：眼珠颜色回到原照片（修脸模型在糊脸上会编出蓝眼睛）
+        irisc_note = ''
+        if not bw_in and body.get('iris', True):
+            try:
+                import crop as _cropmod
+                _m3 = _cropmod._mp()
+                if _m3:
+                    result, irisc_note = _iris_from_orig(result, img, _m3)
+            except Exception as ie2:
+                print('[facecode] 眼珠颜色还原出错，跳过：', ie2, flush=True)
+
         # 美颜（2026-11-07 李总：照美图秀秀那样，脸型圆润一点、皮肤亮白一点、五官微调）
         #   瘦脸 + 大眼 + 皮肤磨皮美白 + 彩色照片嘴唇补血色，每张脸都做。见 beauty.py。
         #   默认 0.7，调用方传 beauty:0 关掉。出错就跳过，修复结果照样返回。
@@ -821,7 +908,7 @@ def enhance():
             tk = 1.0
         if tk > 0:
             try:
-                result = _tone(result, min(1.0, tk))
+                result = _tone(result, min(1.0, tk), bw=bw_in)
                 tone_note = 'tone'
             except Exception as te:
                 print('[facecode] 调明暗出错，跳过：', te, flush=True)
@@ -901,7 +988,7 @@ def enhance():
             fix=did_fix,
             beauty=beauty_note,
             tone=tone_note,
-            iris=iris_note,
+            iris='+'.join([x for x in (irisc_note, iris_note) if x]),
             descratch=scratch_note,
             precrack=pre_note,
             tidy=tidy_note,
