@@ -566,8 +566,10 @@ def _face_clean_raw(img, mesh, smooth=0.0):
         cv2.fillPoly(ex, [cv2.convexHull(P[_FC_NOSE_LOW].astype(np.int32))], 255)
         ex = cv2.dilate(ex, np.ones((max(3, int(fw * 0.045)),) * 2, np.uint8))
         skin[ex > 0] = 0
-        # 眉毛以上不碰：额头常有刘海（深色细线），会被当成划痕涂成一块灰
+        # 眉毛以上：额头常有刘海（深色细线），会被当成划痕涂成一块灰 —— 所以额头只补【孤立的小白点】（霉点、相纸掉的点），
+        # 深色的线、成片的都不碰（2026-11-09 李总圈出撕坏那张额头、发际线上剩的两三个白点）
         brow_y = int(max(P[_FC_BROW_L][:, 1].max(), P[_FC_BROW_R][:, 1].max()) + fw * 0.02)
+        fore = skin.copy(); fore[brow_y:, :] = 0
         skin[:brow_y, :] = 0
         L = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)[..., 0]
         k = max(5, int(fw / 28) | 1)
@@ -575,6 +577,12 @@ def _face_clean_raw(img, mesh, smooth=0.0):
         dark = cv2.morphologyEx(L, cv2.MORPH_BLACKHAT, ker)
         bright = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, ker)
         raw = (((dark > 16) | (bright > 16)) & (skin > 0)).astype(np.uint8)
+        fb = ((bright > 16) & (fore > 0)).astype(np.uint8)
+        cnt2, lab2, st2, _ = cv2.connectedComponentsWithStats(fb, 8)
+        for i in range(1, cnt2):
+            x, y, bw, bh, area = st2[i]
+            if 3 <= area <= int(k * k * 0.5) and max(bw, bh) <= k:
+                raw[lab2 == i] = 1
         # 只留两种：细长的（划痕）和孤立的小点（霉点）。皮肤本来的纹理是一片一片的，不留
         cnt, lab, st, _ = cv2.connectedComponentsWithStats(raw, 8)
         m = np.zeros_like(raw)
