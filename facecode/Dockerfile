@@ -76,12 +76,14 @@ WORKDIR /app/CodeFormer
 ARG HF_HOST
 # ⚠️ git 不存空目录，仓库里 weights/ 下的三个空文件夹到了构建机上是不存在的，curl 会报「写不进去」(exit 23)。先 mkdir。
 #    huggingface.co 对这个仓库回 401（2026-11-03），所以实际从 GitHub release 拿；两条路都带超时，别卡死整个构建。
+#    ⚠️ 2026-11-08 连着三次构建都死在这一步（curl exit 22，GitHub release 临时回错误码，过后再下又好了）。
+#       --retry 默认只重试超时，不重试 4xx/5xx —— 加 --retry-all-errors。
 RUN set -e; \
     mkdir -p weights/CodeFormer weights/facelib weights/realesrgan; \
     H=${HF_HOST}/sczhou/CodeFormer/resolve/main; \
     G=https://github.com/sczhou/CodeFormer/releases/download/v0.1.0; \
     dl() { { [ -n "${HF_HOST}" ] && curl -fsSL --retry 2 --connect-timeout 20 --max-time 300 -o "$1" "$H/$2"; } \
-        || curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 -o "$1" "$G/$3"; }; \
+        || curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 --connect-timeout 20 --max-time 600 -o "$1" "$G/$3"; }; \
     dl weights/CodeFormer/codeformer.pth            codeformer.pth                        codeformer.pth; \
     dl weights/facelib/detection_Resnet50_Final.pth facelib/detection_Resnet50_Final.pth  detection_Resnet50_Final.pth; \
     dl weights/facelib/parsing_parsenet.pth         facelib/parsing_parsenet.pth          parsing_parsenet.pth; \
