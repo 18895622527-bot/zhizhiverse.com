@@ -225,6 +225,78 @@ def _tone(img, k=1.0):
 
 
 # ---------------------------------------------------------------
+# 脸上折痕两边的明暗拉平（2026-11-09 李总：「脸上的这个划痕不应该有」）
+#   裂纹补掉之后，原照片折痕两边一边亮一边暗，CodeFormer 照着修成一道斜的明暗分界。
+#   在脸上把跨过折痕的亮度跳变去掉（梯度清零），泊松重建，纹理留着；再把脸的平均亮度拉回原样。
+#   只在「修脸前去裂纹」找到了长折痕时才做。
+# ---------------------------------------------------------------
+from scipy.fft import dstn as _dstn, idstn as _idstn  # noqa: E402
+
+_FOLD_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
+              152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+
+
+def _poisson(f, div):
+    """解 ∇²u = div，边界 = f 的边界（Dirichlet）。DST 求解。"""
+    h, w = f.shape
+    u = f.copy()
+    b = div[1:-1, 1:-1].copy()
+    b[0, :] -= f[0, 1:-1]; b[-1, :] -= f[-1, 1:-1]; b[:, 0] -= f[1:-1, 0]; b[:, -1] -= f[1:-1, -1]
+    bt = _dstn(b, type=1)
+    yy = np.arange(1, h - 1)[:, None]; xx = np.arange(1, w - 1)[None, :]
+    den = (2 * np.cos(np.pi * yy / (h - 1)) - 2) + (2 * np.cos(np.pi * xx / (w - 1)) - 2)
+    u[1:-1, 1:-1] = _idstn(bt / den, type=1)
+    return u
+
+def _fold_lines(mask, min_span=0.15):
+    h, w = mask.shape[:2]
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+    return [(lab == i) for i in range(1, n) if max(st[i][2], st[i][3]) >= min_span * max(h, w)]
+
+def _even_fold(img, lines, mesh):
+    """lines：修脸前那张图上的折痕（布尔图）。在脸上把跨过折痕的亮度跳变去掉，用泊松重建，纹理留着。"""
+    if not lines: return img, 0
+    h, w = img.shape[:2]
+    r = mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    if not r.multi_face_landmarks: return img, 0
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L = lab[..., 0]
+    fold = np.zeros((h, w), np.uint8)
+    for m in lines:
+        fold |= cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+    n = 0
+    for fl in r.multi_face_landmarks:
+        P = np.array([(q.x * w, q.y * h) for q in fl.landmark], np.float32)
+        oval = P[_FOLD_OVAL]; fw = float(oval[:, 0].max() - oval[:, 0].min())
+        x0, y0 = np.maximum(0, oval.min(0) - fw * 0.15).astype(int); x1, y1 = np.minimum([w, h], oval.max(0) + fw * 0.15).astype(int)
+        band = cv2.dilate(fold[y0:y1, x0:x1], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(5, int(fw / 45)) | 1,) * 2))
+        if band.sum() < 50: continue
+        f = L[y0:y1, x0:x1].astype(np.float64)
+        gx = np.zeros_like(f); gy = np.zeros_like(f)
+        gx[:, :-1] = f[:, 1:] - f[:, :-1]; gy[:-1, :] = f[1:, :] - f[:-1, :]
+        kill = band > 0
+        gx[kill] = 0; gy[kill] = 0
+        div = np.zeros_like(f)
+        div[:, 1:] += gx[:, 1:] - gx[:, :-1]; div[:, 0] += gx[:, 0]
+        div[1:, :] += gy[1:, :] - gy[:-1, :]; div[0, :] += gy[0, :]
+        u = _poisson(f, div)
+        # 只换到脸上（羽化），框的边上保持原样
+        fm = np.zeros((h, w), np.float32); cv2.fillPoly(fm, [oval.astype(np.int32)], 1.0)
+        fm = cv2.GaussianBlur(fm, (0, 0), max(3, fw / 25))[y0:y1, x0:x1]
+        # 折痕上那几个像素没有纹理（梯度被清零了），把原来的细节加回一点
+        hi = f - cv2.GaussianBlur(f, (0, 0), 2.0)
+        u = u + hi * (band > 0) * 0.8
+        # ⚠️ 从边框积分回来，整张脸会整体偏暗/偏亮（实测暗了 20 级）。按脸上的平均亮度拉回原来那样
+        inside = fm > 0.5
+        u = u + (float(f[inside].mean()) - float(u[inside].mean()))
+        L[y0:y1, x0:x1] = np.clip(f * (1 - fm) + u * fm, 0, 255)
+        n += 1
+    if not n: return img, 0
+    lab[..., 0] = L
+    return cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR), n
+
+
+# ---------------------------------------------------------------
 # 修脸之前先去折痕、裂纹（2026-11-09 李总拿一张撕坏的照片试：折痕斜穿过脸，修完还在）
 #   CodeFormer 为了像本人，会照着输入把裂纹也「修」进脸里。所以破损严重的照片先整张清一遍亮线和霉点，再交给它。
 #   五官（眼、眉、嘴）挖掉不碰。只在破损严重时触发。调用方传 precrack:0 关掉。
@@ -278,16 +350,16 @@ def _preclean(img, min_frac=0.05, min_line=0.25):
     import crop as _cropmod
     m0 = _cropmod._mp()
     if not m0:
-        return img, ''
+        return img, '', []
     mesh = m0['mesh']
     m, frac = _crack_mask(img, mesh, 14)
     h, w = img.shape[:2]
     n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
     longest = max([max(st[i][2], st[i][3]) for i in range(1, n)] or [0]) / float(max(h, w))
     if frac < min_frac and longest < min_line:
-        return img, ''
+        return img, '', []
     out, tot = _preclean_raw(img, mesh)
-    return out, 'precrack%.0f' % (100 * float(tot.mean()))
+    return out, 'precrack%.0f' % (100 * float(tot.mean())), _fold_lines(m)
 
 
 # ---------------------------------------------------------------
@@ -608,9 +680,10 @@ def enhance():
         img = _shrink(img)
 
         pre_note = ''
+        fold_lines = []
         if body.get('precrack', True):
             try:
-                img, pre_note = _preclean(img)
+                img, pre_note, fold_lines = _preclean(img)
             except Exception as pe:
                 print('[facecode] 修脸前去裂纹出错，跳过：', pe, flush=True)
 
@@ -679,6 +752,16 @@ def enhance():
                     if _nf: scratch_note += '+face%d' % _nf
             except Exception as fe:
                 print('[facecode] 脸部清理出错，跳过：', fe, flush=True)
+
+        if fold_lines:
+            try:
+                import crop as _cropmod
+                _m1 = _cropmod._mp()
+                if _m1:
+                    result, _nf2 = _even_fold(result, fold_lines, _m1['mesh'])
+                    if _nf2: pre_note += '+fold%d' % _nf2
+            except Exception as fe2:
+                print('[facecode] 折痕明暗拉平出错，跳过：', fe2, flush=True)
 
         iris_note = ''
         if body.get('iris', True):
